@@ -1,0 +1,31 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data and logs
+*.log
+logs/
+data/
+outputs/
+job_*.json
+webscrapper_job_*.json
+
+# Local artifacts
+.DS_Store
+*.db
+*.sqlite3
+
+# Editor
+.vscode/
+.idea/
