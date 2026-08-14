@@ -73,8 +73,10 @@ cp .env.example .env
 
 Nunca versione `.env`. Variáveis principais:
 
+- `OMNIROUTE_URL` e `OMNIROUTE_RESPONSES_URL`: endpoints do serviço de enriquecimento, quando utilizado.
 - `OMNIROUTE_TOKEN`: token do serviço de enriquecimento, quando utilizado.
-- `N8N_WEBHOOK_URL`: webhook de destino; opcional.
+- `N8N_WEBHOOK_URL`: webhook externo de destino; opcional.
+- `BRASILAPI_CNPJ_URL`: endpoint da API de CNPJ, quando utilizado.
 - `BRASILAPI_MIN_INTERVAL_SECONDS`: intervalo mínimo entre consultas de CNPJ.
 - `SCRAPER_API_BASE_URL`: URL da API do Scraper Studio para o monitor de jobs.
 
@@ -116,4 +118,4 @@ python -m pytest -q
 
 ## Licença
 
-Uso interno. Os termos de distribuição devem ser definidos antes de tornar o repositório público.
+Distribuído sob a licença [MIT](LICENSE).

@@ -23,10 +23,10 @@ def get_jobs_dict():
         MANAGER = multiprocessing.Manager()
         SCRAPER_JOBS = MANAGER.dict()
     return SCRAPER_JOBS
-OMNIROUTE_URL = "https://omnirouter.iainfinito.com.br/api/v1/search"
+OMNIROUTE_URL = os.environ.get("OMNIROUTE_URL", "")
 OMNIROUTE_TOKEN = os.environ.get("OMNIROUTE_TOKEN", "")
 DEFAULT_N8N_WEBHOOK = os.environ.get("N8N_WEBHOOK_URL", "")
-BRASILAPI_CNPJ_URL = "https://brasilapi.com.br/api/cnpj/v1/"
+BRASILAPI_CNPJ_URL = os.environ.get("BRASILAPI_CNPJ_URL", "")
 BRASILAPI_MIN_INTERVAL_SECONDS = float(os.environ.get("BRASILAPI_MIN_INTERVAL_SECONDS", "3"))
 BRASILAPI_LOCK = threading.Lock()
 BRASILAPI_LAST_CALL = 0.0
@@ -621,7 +621,9 @@ def fetch_website_content(url):
 def omniroute_extract_website_data(website_url, page_text):
     if not OMNIROUTE_TOKEN or not page_text or len(page_text.strip()) < 50:
         return {}
-    url = "https://omnirouter.iainfinito.com.br/v1/responses"
+    url = os.environ.get("OMNIROUTE_RESPONSES_URL", "")
+    if not url:
+        return {}
     headers = {
         "Authorization": f"Bearer {OMNIROUTE_TOKEN}",
         "Content-Type": "application/json"
