@@ -1,5 +1,11 @@
 # Webscraping Toolkit
 
+[![CI](https://github.com/joel299/webscraping-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/joel299/webscraping-toolkit/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-1.41%2B-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/python/)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Tests](https://img.shields.io/badge/Tests-pytest-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
+
 Toolkit para coleta automatizada de dados públicos, enriquecimento de leads e integração com fluxos de automação.
 
 > Repositório privado. Os dados coletados, logs operacionais, credenciais e configurações de infraestrutura não fazem parte do versionamento.
