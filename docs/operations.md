@@ -87,6 +87,11 @@ O job registra `queries_started`, `queries_completed`,
 atingida, o job termina normalmente com `target_reached=false` e a quantidade
 encontrada, sem looping indefinido.
 
+Se o Maps retornar temporariamente apenas `Google Maps` no título da página, o
+FAST descarta esse valor genérico e usa o título do card ou o nome decodificado
+do segmento `/maps/place/...` da URL. A resolução não abre domínio externo e
+não altera a política de filtros ou de envio único.
+
 Antes de promover uma alteração posterior, conferir no job as métricas de
 `details_skipped`, `details_opened`, `qualified`, `web_results_found` e
 `qualified_leads_per_minute`. Benchmark real deve usar endpoint autorizado e

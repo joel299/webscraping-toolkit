@@ -58,6 +58,14 @@ o envio único ao webhook para a etapa final existente. Duas queries consecutiva
 abaixo de `SCRAPER_LOW_YIELD_QUERY_THRESHOLD` encerram a expansão adaptativa.
 O FULL mantém o fluxo legado.
 
+### Resolução do nome do estabelecimento
+
+O nome do detalhe é normalizado para rejeitar títulos genéricos como `Google
+Maps`. No FAST, o scraper aguarda o H1 com timeout curto e resolve o nome pela
+ordem `H1 válido → título do card → segmento decodificado da URL do Maps`.
+Assim, uma resposta de carregamento parcial não substitui o estabelecimento
+correto por `Google Maps`.
+
 O bloco `Resultados da Web` produz `web_results` com tipo, título, URL, domínio e
 snippet. Instagram e CNPJ encontrados ali recebem, respectivamente,
 `instagram_source` e `cnpj_source` iguais a `google_web_results`. O indicador

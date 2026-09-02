@@ -7,6 +7,9 @@ from src.gmaps_playwright_scraper import (
     generate_query_variations,
     low_yield_should_stop,
     preserve_google_instagram,
+    normalize_place_name,
+    place_name_from_maps_url,
+    resolve_place_name,
     _prequalify_card,
     parse_google_web_result_payload,
     parse_rating,
@@ -111,3 +114,15 @@ def test_fast_preserves_instagram_found_by_google_results():
         'https://www.instagram.com/empresa/',
         'https://www.instagram.com/empresa/',
     ]) == ['https://www.instagram.com/empresa/']
+
+
+def test_place_name_resolution_ignores_generic_maps_title():
+    url = 'https://www.google.com.br/maps/place/Flowers+Clinic+-+Cl%C3%ADnica+de+Est%C3%A9tica+Avan%C3%A7ada+por+Dra.+Flora+Martinez/'
+    assert normalize_place_name('Google Maps') == ''
+    assert place_name_from_maps_url(url) == 'Flowers Clinic - Clínica de Estética Avançada por Dra. Flora Martinez'
+    assert resolve_place_name({'place_name': 'Google Maps'}, {}, url) == 'Flowers Clinic - Clínica de Estética Avançada por Dra. Flora Martinez'
+
+
+def test_place_name_resolution_prefers_card_title_over_url():
+    url = 'https://www.google.com.br/maps/place/Clinica+de+Estetica+Claudia+Massolim+%7C+Campo+Grande+MS/'
+    assert resolve_place_name({'place_name': 'Google Maps'}, {'title': 'Clínica de Estética Cláudia Massolim | Campo Grande MS'}, url) == 'Clínica de Estética Cláudia Massolim | Campo Grande MS'

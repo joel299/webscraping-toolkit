@@ -170,6 +170,39 @@ def preserve_google_instagram(values):
     return list(dict.fromkeys(values or []))
 
 
+GENERIC_PLACE_NAMES = {'', 'google', 'google maps', 'maps'}
+
+
+def normalize_place_name(value):
+    value = re.sub(r'\s+', ' ', str(value or '')).strip()
+    return '' if value.lower() in GENERIC_PLACE_NAMES else value
+
+
+def place_name_from_maps_url(url):
+    try:
+        parsed = urllib.parse.urlparse(str(url or ''))
+        path = urllib.parse.unquote(parsed.path)
+        match = re.search(r'/maps/place/([^/]+)', path, re.IGNORECASE)
+        if not match:
+            return ''
+        return normalize_place_name(urllib.parse.unquote_plus(match.group(1)).replace('+', ' '))
+    except Exception:
+        return ''
+
+
+def resolve_place_name(detail, item=None, page_url=''):
+    item = item or {}
+    for candidate in (
+        detail.get('place_name'), item.get('title'),
+        place_name_from_maps_url(page_url),
+        place_name_from_maps_url(detail.get('google_maps_url')),
+    ):
+        candidate = normalize_place_name(candidate)
+        if candidate:
+            return candidate
+    return ''
+
+
 def candidate_identity(item):
     href = clean_google_redirect_url(item.get('href') or '')
     if href:
@@ -376,19 +409,24 @@ def enrich_with_cnpj_and_owner(context, lead):
     lead['cnpj'] = cnpj
     return lead
 
-def extract_detail_from_place_page(page, fast=False):
+def extract_detail_from_place_page(page, fast=False, item=None):
     if not fast:
         time.sleep(2.0)
     data = {}
 
     # 1. Place Name
+    if fast:
+        try:
+            page.wait_for_selector('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1', timeout=3000)
+        except Exception:
+            pass
     title_el = page.query_selector('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1')
     if title_el and title_el.inner_text().strip():
         data['place_name'] = title_el.inner_text().strip()
     else:
         try:
             pg_title = (page.title() or '').split('- Google Maps')[0].split('- Google')[0].strip()
-            data['place_name'] = pg_title
+            data['place_name'] = normalize_place_name(pg_title)
         except Exception:
             data['place_name'] = ''
 
@@ -484,6 +522,7 @@ def extract_detail_from_place_page(page, fast=False):
         data['plus_code'] = ''
 
     data['google_maps_url'] = page.url
+    data['place_name'] = resolve_place_name(data, item, data['google_maps_url'])
     return data
 
 def generate_query_variations(category, city, state):
@@ -643,7 +682,7 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             inc('details_opened')
                             detail_started = time.perf_counter()
                             detail_page.goto(item['href'], wait_until='commit', timeout=10000)
-                            detail = extract_detail_from_place_page(detail_page, fast=True)
+                            detail = extract_detail_from_place_page(detail_page, fast=True, item=item)
                             if job_dict is not None:
                                 job_dict['detail_processing_ms'] = round(job_dict.get('detail_processing_ms', 0.0) + (time.perf_counter() - detail_started) * 1000, 2)
                             detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city, 'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
