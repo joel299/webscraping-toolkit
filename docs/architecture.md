@@ -82,6 +82,26 @@ O job expõe métricas monotônicas convertidas em milissegundos (`candidate_sea
 `total_pipeline_ms`) e contadores de qualidade. Essas métricas são internas e
 não alteram o payload enviado ao n8n.
 
+## FAST PATH V2
+
+O caminho crítico do FAST separa detalhe básico de dados opcionais:
+
+```text
+card → pré-filtro → goto → detalhe básico → retry curto de telefone
+→ validação barata → Resultados da Web QUICK → lead qualificado
+```
+
+Leads sem WhatsApp, nicho incompatível, rating abaixo de `4.5` ou menos de `20`
+avaliações quando explicitamente disponíveis no detalhe são rejeitados antes de
+`Resultados da Web`. O bloco opcional continua disponível no Maps e preserva
+Instagram/CNPJ preliminar, mas usa `FAST_WEB_RESULTS_MAX_SCROLLS` no FAST e não
+altera o comportamento FULL.
+
+O job agrega `performance.detail`, `performance.goto`,
+`performance.ready_wait`, `performance.basic_extract`,
+`performance.qualification` e `performance.web_results` com count, média, p50,
+p95 e máximo. As métricas são internas e não alteram o payload n8n.
+
 ## Módulos
 
 - `gmaps_playwright_scraper.py`: navegação e extração no Google Maps.

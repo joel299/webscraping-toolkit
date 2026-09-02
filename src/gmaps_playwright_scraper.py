@@ -139,11 +139,19 @@ def scraper_float_env(name, default, minimum=0.0):
         return default
 
 
+def route_fast_resources(route, request):
+    if request.resource_type in {'image', 'media', 'font'}:
+        route.abort()
+    else:
+        route.continue_()
+
+
 def discovery_limits(max_leads):
     oversampling = scraper_float_env('SCRAPER_OVERSAMPLING_FACTOR', 1.5, 1.0)
     query_limit = scraper_int_env('SCRAPER_QUERY_CANDIDATE_LIMIT', 50, 1)
     return {
         'max_pool': max(int(max_leads * oversampling), 30),
+        'hard_cap': max(int(max_leads * scraper_float_env('SCRAPER_HARD_CANDIDATE_FACTOR', 4.0, 1.0)), scraper_int_env('SCRAPER_MIN_HARD_CANDIDATES', 50, 1)),
         'query_limit': query_limit,
         'max_scrolls': scraper_int_env('SCRAPER_MAX_SCROLLS_PER_QUERY', 18),
         'scroll_wait_ms': scraper_int_env('SCRAPER_SCROLL_WAIT_MS', 1500),
@@ -151,6 +159,13 @@ def discovery_limits(max_leads):
         'low_yield_threshold': scraper_int_env('SCRAPER_LOW_YIELD_QUERY_THRESHOLD', 5),
         'max_low_yield_queries': scraper_int_env('SCRAPER_MAX_LOW_YIELD_QUERIES', 2),
         'reuse_detail_page': os.environ.get('SCRAPER_REUSE_DETAIL_PAGE', 'true').lower() == 'true',
+        'detail_ready_wait_ms': scraper_int_env('SCRAPER_DETAIL_READY_WAIT_MS', 1200),
+        'phone_retry_wait_ms': scraper_int_env('SCRAPER_PHONE_RETRY_WAIT_MS', 700),
+        'fast_web_results_max_scrolls': scraper_int_env('FAST_WEB_RESULTS_MAX_SCROLLS', 1),
+        'fast_web_results_scroll_delay_ms': scraper_int_env('FAST_WEB_RESULTS_SCROLL_DELAY_MS', 200),
+        'reuse_search_page': os.environ.get('SCRAPER_REUSE_SEARCH_PAGE', 'true').lower() == 'true',
+        'hard_candidate_factor': scraper_float_env('SCRAPER_HARD_CANDIDATE_FACTOR', 4.0, 1.0),
+        'min_hard_candidates': scraper_int_env('SCRAPER_MIN_HARD_CANDIDATES', 50, 1),
     }
 
 
@@ -226,6 +241,14 @@ def initialize_discovery_metrics(job_dict, target):
         'target_reached': False, 'early_stop_triggered': False,
         'time_to_first_candidate_ms': None, 'time_to_first_qualified_lead_ms': None,
         'query_discovery_ms': 0.0, 'detail_processing_ms': 0.0,
+        'detail_total_ms': 0.0, 'detail_goto_ms': 0.0,
+        'detail_ready_wait_ms': 0.0, 'basic_extract_ms': 0.0,
+        'web_results_ms': 0.0, 'web_results_scroll_ms': 0.0,
+        'qualification_ms': 0.0, 'detail_timeouts': 0,
+        'web_results_attempted': 0, 'web_results_skipped': 0,
+        'web_results_found': 0, 'web_results_instagram_found': 0,
+        'rejected_before_web_results': 0,
+        'detail_performance_samples': [],
     })
 
 def candidate_card_metadata(element):
@@ -242,11 +265,15 @@ def candidate_card_metadata(element):
     except Exception:
         return {}
 
-def extract_google_web_results(page):
-    """Read Google's optional "Resultados da Web" block without fixed XPaths."""
-    max_scrolls = max(0, int(os.environ.get('WEB_RESULTS_MAX_SCROLLS', '3')))
-    try:
-        payload = page.evaluate('''() => {
+def extract_google_web_results(page, max_scrolls=None, scroll_delay_ms=None):
+    """Read Google's optional web-results block from its semantic container."""
+    if max_scrolls is None:
+        max_scrolls = max(0, int(os.environ.get('WEB_RESULTS_MAX_SCROLLS', '3')))
+    if scroll_delay_ms is None:
+        scroll_delay_ms = 200
+
+    def read_block():
+        return page.evaluate('''() => {
             const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
             const heading = headings.find(el => /resultados da web/i.test(el.innerText || ''));
             if (!heading) return {text: '', links: []};
@@ -259,17 +286,18 @@ def extract_google_web_results(page):
                 text: root.innerText || '',
                 links: [...root.querySelectorAll('a[href]')].map(a => ({url: a.href, title: a.innerText || a.getAttribute('aria-label') || '', snippet: a.parentElement?.innerText || ''})).filter(x => x.url)
             };
-        }''')
+        }''') or {'text': '', 'links': []}
+
+    try:
+        payload = read_block()
         result = parse_google_web_result_payload(payload)
         for _ in range(max_scrolls):
             if result['web_results']:
                 break
             page.mouse.wheel(0, 500)
-            time.sleep(0.2)
-            payload = page.evaluate('''() => ({
-                text: document.body.innerText || '',
-                links: [...document.querySelectorAll('a[href]')].map(a => ({url: a.href, title: a.innerText || '', snippet: a.parentElement?.innerText || ''})).filter(x => x.url)
-            })''')
+            if scroll_delay_ms:
+                time.sleep(scroll_delay_ms / 1000)
+            payload = read_block()
             result = parse_google_web_result_payload(payload)
         return result
     except Exception:
@@ -409,17 +437,26 @@ def enrich_with_cnpj_and_owner(context, lead):
     lead['cnpj'] = cnpj
     return lead
 
-def extract_detail_from_place_page(page, fast=False, item=None):
+def _extract_place_detail(page, fast=False, item=None, include_optional=True, ready_wait_ms=1200, timings=None):
     if not fast:
         time.sleep(2.0)
     data = {}
+    timings = timings if timings is not None else {}
 
     # 1. Place Name
     if fast:
+        ready_started = time.perf_counter()
         try:
-            page.wait_for_selector('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1', timeout=3000)
+            page.wait_for_selector(
+                'h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1,'
+                'button[data-item-id="address"], button[data-item-id^="phone:tel:"],'
+                'a[data-item-id="authority"], button[jsaction*="category"]',
+                timeout=ready_wait_ms,
+            )
         except Exception:
             pass
+        timings['ready_wait_ms'] = (time.perf_counter() - ready_started) * 1000
+    basic_started = time.perf_counter()
     title_el = page.query_selector('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1')
     if title_el and title_el.inner_text().strip():
         data['place_name'] = title_el.inner_text().strip()
@@ -493,21 +530,28 @@ def extract_detail_from_place_page(page, fast=False, item=None):
         data['phone_raw'] = raw_phone
         data['whatsapp'] = format_whatsapp(raw_phone)
 
-    # 6. Website and results already rendered by Google Maps. This never
-    # opens the external website; FULL may still enrich it later.
+    # 6. Website already rendered by Google Maps. Optional web results are
+    # deliberately separated so FAST can qualify cheaply first.
     web_btn = page.query_selector('a[data-item-id="authority"], a[aria-label*="site"], a[aria-label*="Website"]')
     if web_btn:
         data['website'] = clean_google_redirect_url(web_btn.get_attribute('href') or '')
     else:
         data['website'] = ''
-    web_results = extract_google_web_results(page)
-    if not data['website']:
-        data['website'] = web_results['website']
-    data['instagram'] = web_results['instagram']
-    data['google_result_cnpj'] = web_results['cnpj']
-    data['web_results'] = web_results['web_results']
-    data['instagram_source'] = 'google_web_results' if data['instagram'] else ''
-    data['cnpj_source'] = 'google_web_results' if data['google_result_cnpj'] else ''
+    if include_optional:
+        web_results = extract_google_web_results(page)
+        if not data['website']:
+            data['website'] = web_results['website']
+        data['instagram'] = web_results['instagram']
+        data['google_result_cnpj'] = web_results['cnpj']
+        data['web_results'] = web_results['web_results']
+        data['instagram_source'] = 'google_web_results' if data['instagram'] else ''
+        data['cnpj_source'] = 'google_web_results' if data['google_result_cnpj'] else ''
+    else:
+        data['instagram'] = []
+        data['google_result_cnpj'] = ''
+        data['web_results'] = []
+        data['instagram_source'] = ''
+        data['cnpj_source'] = ''
 
     # 7. Plus Code
     code_btn = page.query_selector('button[data-item-id="oloc"]')
@@ -523,6 +567,80 @@ def extract_detail_from_place_page(page, fast=False, item=None):
 
     data['google_maps_url'] = page.url
     data['place_name'] = resolve_place_name(data, item, data['google_maps_url'])
+    timings['basic_extract_ms'] = (time.perf_counter() - basic_started) * 1000
+    return data
+
+
+def extract_basic_place_detail(page, fast=False, item=None, ready_wait_ms=1200, timings=None):
+    return _extract_place_detail(
+        page, fast=fast, item=item, include_optional=False,
+        ready_wait_ms=ready_wait_ms, timings=timings,
+    )
+
+
+def extract_optional_google_web_results(page, fast=False, timings=None):
+    started = time.perf_counter()
+    if fast:
+        result = extract_google_web_results(
+            page,
+            max_scrolls=max(0, int(os.environ.get('FAST_WEB_RESULTS_MAX_SCROLLS', '1'))),
+            scroll_delay_ms=max(0, int(os.environ.get('FAST_WEB_RESULTS_SCROLL_DELAY_MS', '200'))),
+        )
+    else:
+        result = extract_google_web_results(page)
+    if timings is not None:
+        timings['web_results_ms'] = (time.perf_counter() - started) * 1000
+    return result
+
+
+def extract_phone_from_place_page(page):
+    phone_btn = page.query_selector('button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]')
+    if not phone_btn:
+        return {'phone_raw': '', 'whatsapp': ''}
+    aria = phone_btn.get_attribute('aria-label') or ''
+    if 'Telefone:' in aria:
+        raw_phone = aria.split('Telefone:')[-1].strip()
+    else:
+        lines = [l.strip() for l in phone_btn.inner_text().split('\n') if l.strip() and l.strip() != '']
+        raw_phone = ' '.join(lines)
+    return {'phone_raw': raw_phone, 'whatsapp': format_whatsapp(raw_phone)}
+
+
+def summarize_samples(values):
+    values = sorted(float(value) for value in values if value is not None)
+    if not values:
+        return {'count': 0, 'min_ms': 0.0, 'p50_ms': 0.0, 'p95_ms': 0.0, 'max_ms': 0.0, 'avg_ms': 0.0}
+    p50 = values[(len(values) - 1) // 2]
+    p95 = values[min(len(values) - 1, max(0, int(len(values) * 0.95) - 1))]
+    return {
+        'count': len(values), 'min_ms': round(values[0], 2),
+        'p50_ms': round(p50, 2), 'p95_ms': round(p95, 2),
+        'max_ms': round(values[-1], 2), 'avg_ms': round(sum(values) / len(values), 2),
+    }
+
+
+def detail_prequalification_reason(detail, category):
+    if not classify_business_niche(detail):
+        return 'category'
+    rating = parse_rating(detail.get('total_score'))
+    if rating is not None and rating < 4.5:
+        return 'rating'
+    reviews = parse_reviews(detail.get('reviews_count'))
+    if reviews is not None and reviews < 20:
+        return 'reviews'
+    return ''
+
+
+def extract_detail_from_place_page(page, fast=False, item=None):
+    data = extract_basic_place_detail(page, fast=fast, item=item)
+    optional = extract_optional_google_web_results(page, fast=fast)
+    if not data.get('website'):
+        data['website'] = optional.get('website', '')
+    data.update({key: optional.get(key, default) for key, default in {
+        'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+    }.items()})
+    data['instagram_source'] = 'google_web_results' if data.get('instagram') else ''
+    data['cnpj_source'] = 'google_web_results' if data.get('cnpj') else ''
     return data
 
 def generate_query_variations(category, city, state):
@@ -604,6 +722,16 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
         if job_dict is not None:
             job_dict[key] = int(job_dict.get(key, 0)) + amount
 
+    def record_detail(timings):
+        if job_dict is None:
+            return
+        samples = list(job_dict.get('detail_performance_samples') or [])
+        samples.append(dict(timings))
+        job_dict['detail_performance_samples'] = samples[-100:]
+        total = float(timings.get('total_ms', 0.0))
+        job_dict['detail_processing_ms'] = round(job_dict.get('detail_processing_ms', 0.0) + total, 2)
+        job_dict['detail_total_ms'] = job_dict['detail_processing_ms']
+
     def progress(q_idx):
         if job_dict is not None:
             job_dict['leads'] = json.loads(json.dumps(results, ensure_ascii=False))
@@ -618,7 +746,10 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
             context = browser.new_context(locale='pt-BR', ignore_https_errors=True)
+            if os.environ.get('SCRAPER_BLOCK_HEAVY_RESOURCES', 'false').lower() == 'true':
+                context.route('**/*', route_fast_resources)
             context.on('page', lambda page: page.on('dialog', lambda dialog: dialog.dismiss()))
+            search_page = None
             for q_idx, query in enumerate(queries, 1):
                 if len(results) >= max_leads:
                     break
@@ -630,7 +761,11 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                 prequalified_before = int(job_dict.get('candidates_prequalified', 0)) if job_dict else 0
                 leads_before = len(results)
                 try:
-                    page_search = context.new_page()
+                    if search_page is None or not limits['reuse_search_page']:
+                        if search_page is not None:
+                            search_page.close()
+                        search_page = context.new_page()
+                    page_search = search_page
                     page_search.set_default_timeout(30000)
                     page_search.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=45000)
                     feed = page_search.wait_for_selector('div[role="feed"]', timeout=15000)
@@ -641,7 +776,7 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                     previous_cards = 0
                     query_seen_hrefs = set()
                     for _ in range(limits['max_scrolls']):
-                        if len(results) >= max_leads or len(seen_candidates) >= limits['max_pool']:
+                        if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']:
                             break
                         links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
                         new_count = 0
@@ -681,16 +816,60 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                                 detail_page.on('dialog', lambda dialog: dialog.dismiss())
                             inc('details_opened')
                             detail_started = time.perf_counter()
+                            timings = {}
+                            goto_started = time.perf_counter()
                             detail_page.goto(item['href'], wait_until='commit', timeout=10000)
-                            detail = extract_detail_from_place_page(detail_page, fast=True, item=item)
-                            if job_dict is not None:
-                                job_dict['detail_processing_ms'] = round(job_dict.get('detail_processing_ms', 0.0) + (time.perf_counter() - detail_started) * 1000, 2)
+                            timings['goto_ms'] = (time.perf_counter() - goto_started) * 1000
+                            detail = extract_basic_place_detail(
+                                detail_page, fast=True, item=item,
+                                ready_wait_ms=limits['detail_ready_wait_ms'],
+                                timings=timings,
+                            )
                             detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city, 'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
+                            qualification_started = time.perf_counter()
+                            phone_retry_started = time.perf_counter()
                             wa = detail.get('whatsapp') or ''
+                            if not wa:
+                                try:
+                                    detail_page.wait_for_selector(
+                                        'button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]',
+                                        timeout=limits['phone_retry_wait_ms'],
+                                    )
+                                except Exception:
+                                    pass
+                                detail.update(extract_phone_from_place_page(detail_page))
+                                wa = detail.get('whatsapp') or ''
+                            timings['qualification_ms'] = (time.perf_counter() - qualification_started) * 1000
                             if not wa:
                                 inc('rejected_whatsapp')
                                 inc('without_whatsapp')
+                                inc('rejected_before_web_results')
+                                inc('web_results_skipped')
+                                timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
+                                record_detail(timings)
                                 continue
+                            reason = detail_prequalification_reason({**item, **detail}, category)
+                            if reason:
+                                inc('rejected_' + reason)
+                                inc('candidates_rejected_pre_detail')
+                                inc('details_avoided')
+                                inc('rejected_before_web_results')
+                                inc('web_results_skipped')
+                                timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
+                                record_detail(timings)
+                                continue
+                            inc('web_results_attempted')
+                            optional = extract_optional_google_web_results(detail_page, fast=True, timings=timings)
+                            if not detail.get('website'):
+                                detail['website'] = optional.get('website', '')
+                            detail.update({key: optional.get(key, default) for key, default in {
+                                'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+                                'instagram_source': '', 'cnpj_source': '',
+                            }.items()})
+                            if optional.get('web_results'):
+                                inc('web_results_found')
+                            if optional.get('instagram'):
+                                inc('web_results_instagram_found')
                             place_key = f'{detail.get("place_name", "")}|{detail.get("street") or detail.get("address") or ""}'.lower()
                             if (place_key != '|' and place_key in seen_places) or wa in seen_phones:
                                 inc('candidates_duplicate')
@@ -703,6 +882,8 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             detail['facebook'], detail['linkedin'], detail['emails'] = [], [], []
                             results.append(detail)
                             inc('qualified_leads')
+                            timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
+                            record_detail(timings)
                             if job_dict is not None and len(results) == 1:
                                 job_dict['time_to_first_qualified_lead_ms'] = round((time.perf_counter() - started) * 1000, 2)
                             progress(q_idx)
@@ -740,10 +921,13 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                         'prequalified_candidates': (int(job_dict.get('candidates_prequalified', 0)) - prequalified_before) if job_dict else 0,
                         'qualified_leads_generated': len(results) - leads_before,
                     })
-                    if page_search:
-                        page_search.close(timeout=2000)
+                    if page_search and not limits['reuse_search_page']:
+                        page_search.close()
+                        page_search = None
             if detail_page:
                 detail_page.close()
+            if search_page:
+                search_page.close()
             browser.close()
     finally:
         if job_dict is not None:
@@ -757,6 +941,34 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
             job_dict['detail_efficiency_rate'] = round(len(results) / max(job_dict.get('details_opened', 0), 1) * 100, 2)
             job_dict['details_avoided_rate'] = round(job_dict.get('details_avoided', 0) / max(len(seen_candidates), 1) * 100, 2)
             job_dict['qualified_leads_per_minute'] = round(len(results) / max(elapsed / 60000, 0.001), 2)
+            samples = list(job_dict.get('detail_performance_samples') or [])
+            job_dict['average_detail_ms'] = round(sum(float(x.get('total_ms', 0.0)) for x in samples) / max(len(samples), 1), 2)
+            job_dict['p50_detail_ms'] = summarize_samples([x.get('total_ms') for x in samples])['p50_ms']
+            job_dict['p95_detail_ms'] = summarize_samples([x.get('total_ms') for x in samples])['p95_ms']
+            job_dict['max_detail_ms'] = summarize_samples([x.get('total_ms') for x in samples])['max_ms']
+            job_dict['performance'] = {
+                'detail': summarize_samples([x.get('total_ms') for x in samples]),
+                'goto': summarize_samples([x.get('goto_ms') for x in samples]),
+                'ready_wait': summarize_samples([x.get('ready_wait_ms') for x in samples]),
+                'basic_extract': summarize_samples([x.get('basic_extract_ms') for x in samples]),
+                'qualification': summarize_samples([x.get('qualification_ms') for x in samples]),
+                'web_results': {
+                    'attempted': job_dict.get('web_results_attempted', 0),
+                    'skipped': job_dict.get('web_results_skipped', 0),
+                    'found': job_dict.get('web_results_found', 0),
+                    'instagram_found': job_dict.get('web_results_instagram_found', 0),
+                    'timing': summarize_samples([x.get('web_results_ms') for x in samples]),
+                },
+            }
+            for metric_name, phase in {
+                'detail_goto_ms': 'goto',
+                'detail_ready_wait_ms': 'ready_wait',
+                'basic_extract_ms': 'basic_extract',
+                'qualification_ms': 'qualification',
+            }.items():
+                job_dict[metric_name] = job_dict['performance'][phase]['avg_ms']
+            job_dict['web_results_ms'] = job_dict['performance']['web_results']['timing']['avg_ms']
+            job_dict.pop('detail_performance_samples', None)
             job_dict['scrape_total_ms'] = round(elapsed, 2)
             job_dict['query_metrics'] = query_metrics
             job_dict['status'] = 'running'

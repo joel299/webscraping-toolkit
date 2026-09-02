@@ -96,3 +96,16 @@ Antes de promover uma alteração posterior, conferir no job as métricas de
 `details_skipped`, `details_opened`, `qualified`, `web_results_found` e
 `qualified_leads_per_minute`. Benchmark real deve usar endpoint autorizado e
 não deve persistir leads no repositório.
+
+## FAST PATH V2 e medição
+
+Antes de comparar desempenho, consultar no job `performance.detail` e os
+contadores `web_results_attempted`, `web_results_skipped` e
+`rejected_before_web_results`. O tempo configurado é apenas teto; a decisão
+deve usar os tempos reais agregados, especialmente p50 e p95.
+
+`FAST_WEB_RESULTS_MAX_SCROLLS=1` e
+`FAST_WEB_RESULTS_SCROLL_DELAY_MS=200` são defaults exclusivos do FAST. A
+configuração `SCRAPER_BLOCK_HEAVY_RESOURCES` aborta somente imagens, mídia e
+fontes quando habilitada; documentos, scripts, stylesheets, XHR e fetch não são
+bloqueados. FULL permanece com a política anterior.

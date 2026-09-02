@@ -10,6 +10,10 @@ from src.gmaps_playwright_scraper import (
     normalize_place_name,
     place_name_from_maps_url,
     resolve_place_name,
+    extract_basic_place_detail,
+    extract_optional_google_web_results,
+    route_fast_resources,
+    summarize_samples,
     _prequalify_card,
     parse_google_web_result_payload,
     parse_rating,
@@ -126,3 +130,53 @@ def test_place_name_resolution_ignores_generic_maps_title():
 def test_place_name_resolution_prefers_card_title_over_url():
     url = 'https://www.google.com.br/maps/place/Clinica+de+Estetica+Claudia+Massolim+%7C+Campo+Grande+MS/'
     assert resolve_place_name({'place_name': 'Google Maps'}, {'title': 'Clínica de Estética Cláudia Massolim | Campo Grande MS'}, url) == 'Clínica de Estética Cláudia Massolim | Campo Grande MS'
+
+
+def test_fast_optional_web_results_uses_quick_limits(monkeypatch):
+    calls = []
+
+    def fake_extract(page, max_scrolls=None, scroll_delay_ms=None):
+        calls.append((max_scrolls, scroll_delay_ms))
+        return {'website': '', 'instagram': [], 'cnpj': '', 'web_results': []}
+
+    monkeypatch.setattr('src.gmaps_playwright_scraper.extract_google_web_results', fake_extract)
+    extract_optional_google_web_results(object(), fast=True)
+    assert calls == [(1, 200)]
+
+
+def test_basic_detail_does_not_call_optional_results(monkeypatch):
+    calls = []
+
+    def fake_extract(*args, **kwargs):
+        calls.append(kwargs.get('include_optional'))
+        return {'place_name': 'Clínica', 'instagram': [], 'web_results': []}
+
+    monkeypatch.setattr('src.gmaps_playwright_scraper._extract_place_detail', fake_extract)
+    extract_basic_place_detail(object(), fast=True)
+    assert calls == [False]
+
+
+def test_resource_blocker_only_aborts_heavy_types():
+    actions = []
+
+    class Route:
+        def abort(self):
+            actions.append('abort')
+
+        def continue_(self):
+            actions.append('continue')
+
+    class Request:
+        def __init__(self, resource_type):
+            self.resource_type = resource_type
+
+    for resource_type in ('image', 'media', 'font', 'document', 'script', 'xhr', 'fetch'):
+        route_fast_resources(Route(), Request(resource_type))
+    assert actions == ['abort', 'abort', 'abort', 'continue', 'continue', 'continue', 'continue']
+
+
+def test_detail_sample_summary_is_aggregated():
+    summary = summarize_samples([100, 200, 400, None])
+    assert summary['count'] == 3
+    assert summary['min_ms'] == 100
+    assert summary['max_ms'] == 400
