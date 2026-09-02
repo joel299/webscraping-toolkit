@@ -166,6 +166,15 @@ def discovery_limits(max_leads):
         'reuse_search_page': os.environ.get('SCRAPER_REUSE_SEARCH_PAGE', 'true').lower() == 'true',
         'hard_candidate_factor': scraper_float_env('SCRAPER_HARD_CANDIDATE_FACTOR', 4.0, 1.0),
         'min_hard_candidates': scraper_int_env('SCRAPER_MIN_HARD_CANDIDATES', 50, 1),
+        'pipeline_strategy': os.environ.get('SCRAPER_PIPELINE_STRATEGY', 'interleaved').lower(),
+        'warmup_batch_size': scraper_int_env('SCRAPER_WARMUP_BATCH_SIZE', 2, 2),
+        'detail_batch_size': scraper_int_env('SCRAPER_DETAIL_BATCH_SIZE', 6, 2),
+        'max_detail_batch_size': min(8, scraper_int_env('SCRAPER_MAX_DETAIL_BATCH_SIZE', 8, 2)),
+        'dynamic_batch_size': os.environ.get('SCRAPER_DYNAMIC_BATCH_SIZE', 'true').lower() == 'true',
+        'card_snapshot': os.environ.get('SCRAPER_CARD_SNAPSHOT', 'true').lower() == 'true',
+        'basic_detail_snapshot': os.environ.get('SCRAPER_BASIC_DETAIL_SNAPSHOT', 'true').lower() == 'true',
+        'progress_sync_interval_ms': scraper_int_env('SCRAPER_PROGRESS_SYNC_INTERVAL_MS', 500, 0),
+        'progress_sync_every_leads': scraper_int_env('SCRAPER_PROGRESS_SYNC_EVERY_LEADS', 2, 1),
     }
 
 
@@ -264,6 +273,47 @@ def candidate_card_metadata(element):
         }''') or {}
     except Exception:
         return {}
+
+
+def extract_candidate_cards_snapshot(feed):
+    """Capture all rendered card metadata with one browser round-trip."""
+    return feed.evaluate('''feed => {
+        const links = [...feed.querySelectorAll('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')];
+        return links.map(link => {
+            let root = link;
+            for (let i = 0; i < 5 && root.parentElement; i++) {
+                root = root.parentElement;
+                if (root.getAttribute('role') === 'article' || root.querySelector('[role="img"]')) break;
+            }
+            return {
+                href: link.href || '',
+                title: link.getAttribute('aria-label') || '',
+                card_text: root.innerText || '',
+                card_aria: root.getAttribute('aria-label') || ''
+            };
+        });
+    }''') or []
+
+
+def extract_basic_place_snapshot(page):
+    """Capture essential detail fields with one browser round-trip."""
+    return page.evaluate('''() => {
+        const text = (selector) => document.querySelector(selector)?.innerText?.trim() || '';
+        const aria = (selector) => document.querySelector(selector)?.getAttribute('aria-label') || '';
+        const addressAria = aria('button[data-item-id="address"], button[aria-label*="Endereço:"]');
+        const phoneAria = aria('button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]');
+        const plusAria = aria('button[data-item-id="oloc"]');
+        return {
+            place_name: text('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1'),
+            total_score: text('div.F7vEfc span.ceNzKf, div.fontBodyMedium span[aria-hidden="true"]'),
+            reviews_count: text('button[jsaction*="review"], button[aria-label*="avaliações"]'),
+            category: text('button[jsaction*="category"]'),
+            address: addressAria.replace(/^.*Endereço:[ \\t]*/i, '') || text('button[data-item-id="address"], button[aria-label*="Endereço:"]'),
+            phone_raw: phoneAria.replace(/^.*Telefone:[ \\t]*/i, '') || text('button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]'),
+            website: document.querySelector('a[data-item-id="authority"], a[aria-label*="site"], a[aria-label*="Website"]')?.href || '',
+            plus_code: plusAria.replace(/^.*Plus Code:[ \\t]*/i, '') || text('button[data-item-id="oloc"]')
+        };
+    }''') or {}
 
 def extract_google_web_results(page, max_scrolls=None, scroll_delay_ms=None):
     """Read Google's optional web-results block from its semantic container."""
@@ -571,7 +621,50 @@ def _extract_place_detail(page, fast=False, item=None, include_optional=True, re
     return data
 
 
+def _detail_from_snapshot(page, item=None, ready_wait_ms=1200, timings=None):
+    started = time.perf_counter()
+    try:
+        page.wait_for_selector(
+            'h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1,'
+            'button[data-item-id="address"], button[data-item-id^="phone:tel:"],'
+            'a[data-item-id="authority"], button[jsaction*="category"]',
+            timeout=ready_wait_ms,
+        )
+    except Exception:
+        pass
+    try:
+        raw = extract_basic_place_snapshot(page)
+    except Exception:
+        return None
+    data = {
+        'place_name': normalize_place_name(raw.get('place_name')),
+        'total_score': (raw.get('total_score') or '').replace(',', '.'),
+        'reviews_count': raw.get('reviews_count') or '',
+        'category': raw.get('category') or '',
+        'address': raw.get('address') or '',
+        'phone_raw': raw.get('phone_raw') or '',
+        'website': clean_google_redirect_url(raw.get('website') or ''),
+        'plus_code': raw.get('plus_code') or '',
+        'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+        'instagram_source': '', 'cnpj_source': '',
+        'google_maps_url': page.url,
+    }
+    data['whatsapp'] = format_whatsapp(data['phone_raw'])
+    data['street'] = data['address'].split('-')[0].strip() if data['address'] else ''
+    data['place_name'] = resolve_place_name(data, item, data['google_maps_url'])
+    if not data['place_name'] or not data['phone_raw']:
+        return None
+    if timings is not None:
+        timings['ready_wait_ms'] = (time.perf_counter() - started) * 1000
+        timings['basic_extract_ms'] = 0.0
+    return data
+
+
 def extract_basic_place_detail(page, fast=False, item=None, ready_wait_ms=1200, timings=None):
+    if fast and os.environ.get('SCRAPER_BASIC_DETAIL_SNAPSHOT', 'true').lower() == 'true':
+        snapshot = _detail_from_snapshot(page, item=item, ready_wait_ms=ready_wait_ms, timings=timings)
+        if snapshot is not None:
+            return snapshot
     return _extract_place_detail(
         page, fast=fast, item=item, include_optional=False,
         ready_wait_ms=ready_wait_ms, timings=timings,
@@ -708,8 +801,245 @@ def _prequalify_card(item, category):
     return ''
 
 
+def candidate_priority_score(item, category=''):
+    text = f"{item.get('title', '')} {item.get('card_text', '')}".lower()
+    score = 30 if item.get('google_sponsored') else 0
+    reviews = item.get('reviews_count')
+    rating = item.get('rating')
+    if reviews is not None:
+        score += 20 if reviews >= 100 else 10 if reviews >= 50 else 0
+    if rating is not None:
+        score += 15 if rating >= 4.8 else 5 if rating >= 4.5 else 0
+    if classify_business_niche({'title': item.get('title'), 'category': category, 'card_text': text}):
+        score += 20
+    return score
+
+
+def next_detail_batch_size(conversion_rate, configured=6, dynamic=True, maximum=8):
+    if not dynamic:
+        return max(2, min(maximum, configured))
+    if conversion_rate >= 0.70:
+        return 4
+    if conversion_rate >= 0.35:
+        return 6
+    return max(2, min(maximum, 8))
+
+
+def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode):
+    limits = discovery_limits(max_leads)
+    initialize_discovery_metrics(job_dict, max_leads)
+    results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
+    detail_samples, query_metrics = [], []
+    queries, started = generate_query_variations(category, city, state), time.perf_counter()
+    local = {key: 0 for key in ('queries_started', 'queries_completed', 'queries_skipped',
+        'candidate_cards_seen', 'candidates_unique', 'candidates_duplicate',
+        'candidates_prequalified', 'candidates_rejected_pre_detail', 'details_avoided',
+        'details_opened', 'qualified_leads', 'without_whatsapp', 'rejected_whatsapp',
+        'rejected_before_web_results', 'web_results_attempted', 'web_results_skipped',
+        'web_results_found', 'web_results_instagram_found', 'candidate_snapshot_count',
+        'basic_detail_snapshot_fallbacks', 'candidate_batches_processed', 'progress_sync_count')}
+    local.update({'candidate_snapshot_ms': [], 'basic_detail_snapshot_ms': [], 'batch_sizes': [],
+                  'candidate_priority_used': 0, 'manager_sync_count': 0, 'last_sync': 0.0,
+                  'last_synced_leads': 0})
+
+    def sync_job_metrics(q_idx=0, force=False):
+        now = time.perf_counter()
+        due = ((now - local['last_sync']) * 1000 >= limits['progress_sync_interval_ms'] or
+               len(results) - local['last_synced_leads'] >= limits['progress_sync_every_leads'])
+        if job_dict is None or (not force and not due):
+            return
+        for key, value in local.items():
+            if key not in ('candidate_snapshot_ms', 'basic_detail_snapshot_ms', 'batch_sizes',
+                           'last_sync', 'last_synced_leads') and isinstance(value, (int, float)):
+                job_dict[key] = value
+        job_dict['leads'] = json.loads(json.dumps(results, ensure_ascii=False))
+        job_dict['current_count'] = len(results)
+        job_dict['progress_sync_count'] = local['progress_sync_count'] + 1
+        job_dict['manager_sync_count'] = local['manager_sync_count'] + 1
+        job_dict['log'] = (f'FAST V3 | Query {q_idx}/{len(queries)} | candidatos={local["candidate_cards_seen"]} '
+                           f'| buffer | detalhes={local["details_opened"]} | leads={len(results)}/{max_leads}')
+        job_dict['last_activity'] = time.time()
+        local['last_sync'], local['last_synced_leads'] = now, len(results)
+        local['progress_sync_count'] += 1
+        local['manager_sync_count'] += 1
+
+    def process_batch(candidates, detail_page, q_idx, batch_number):
+        if not candidates:
+            return
+        candidates.sort(key=lambda item: candidate_priority_score(item, category), reverse=True)
+        local['candidate_priority_used'] += 1
+        local['candidate_batches_processed'] += 1
+        local['batch_sizes'].append(len(candidates))
+        qualified_before = len(results)
+        details_before = local['details_opened']
+        for item in candidates:
+            if len(results) >= max_leads:
+                local['target_reached'] = 1
+                break
+            local['details_opened'] += 1
+            detail_started, timings = time.perf_counter(), {}
+            try:
+                goto_started = time.perf_counter()
+                detail_page.goto(item['href'], wait_until='commit', timeout=10000)
+                timings['goto_ms'] = (time.perf_counter() - goto_started) * 1000
+                detail = extract_basic_place_detail(detail_page, fast=True, item=item,
+                    ready_wait_ms=limits['detail_ready_wait_ms'], timings=timings)
+                if detail is None:
+                    local['basic_detail_snapshot_fallbacks'] += 1
+                    detail = _extract_place_detail(detail_page, fast=True, item=item,
+                        include_optional=False, ready_wait_ms=limits['detail_ready_wait_ms'], timings=timings)
+                detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city,
+                    'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
+                qualification_started = time.perf_counter()
+                if not detail.get('whatsapp'):
+                    try:
+                        detail_page.wait_for_selector('button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]', timeout=limits['phone_retry_wait_ms'])
+                    except Exception:
+                        pass
+                    detail.update(extract_phone_from_place_page(detail_page))
+                timings['qualification_ms'] = (time.perf_counter() - qualification_started) * 1000
+                reason = 'whatsapp' if not detail.get('whatsapp') else detail_prequalification_reason({**item, **detail}, category)
+                if reason:
+                    local['rejected_before_web_results'] += 1
+                    local['web_results_skipped'] += 1
+                    if reason == 'whatsapp':
+                        local['without_whatsapp'] += 1
+                        local['rejected_whatsapp'] += 1
+                    else:
+                        local['candidates_rejected_pre_detail'] += 1
+                        local['details_avoided'] += 1
+                    timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
+                    detail_samples.append(timings)
+                    continue
+                local['web_results_attempted'] += 1
+                optional = extract_optional_google_web_results(detail_page, fast=True, timings=timings)
+                detail['website'] = detail.get('website') or optional.get('website', '')
+                detail.update({key: optional.get(key, default) for key, default in {
+                    'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+                    'instagram_source': '', 'cnpj_source': ''}.items()})
+                local['web_results_found'] += bool(optional.get('web_results'))
+                local['web_results_instagram_found'] += bool(optional.get('instagram'))
+                wa = detail.get('whatsapp') or ''
+                place_key = f'{detail.get("place_name", "")}|{detail.get("street") or detail.get("address") or ""}'.lower()
+                if (place_key != '|' and place_key in seen_places) or wa in seen_phones:
+                    local['candidates_duplicate'] += 1
+                    continue
+                seen_places.add(place_key); seen_phones.add(wa)
+                detail.update({'qualification_status': 'qualified', 'with_whatsapp': True,
+                    'instagram': preserve_google_instagram(detail.get('instagram')), 'facebook': [],
+                    'linkedin': [], 'emails': []})
+                results.append(detail); local['qualified_leads'] += 1
+                timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
+                detail_samples.append(timings)
+                if len(results) == 1 and job_dict is not None:
+                    job_dict['time_to_first_qualified_lead_ms'] = round((time.perf_counter() - started) * 1000, 2)
+                sync_job_metrics(q_idx, force=len(results) == 1)
+            except Exception as exc:
+                print(f'⚠️ Error processing detail: {exc}', flush=True)
+        processed = local['details_opened'] - details_before
+        conversion = (len(results) - qualified_before) / max(processed, 1)
+        local['last_conversion'] = conversion
+        sync_job_metrics(q_idx, force=True)
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(locale='pt-BR', ignore_https_errors=True)
+            if os.environ.get('SCRAPER_BLOCK_HEAVY_RESOURCES', 'false').lower() == 'true':
+                context.route('**/*', route_fast_resources)
+            detail_page = context.new_page(); detail_page.set_default_timeout(15000)
+            search_page = context.new_page(); search_page.set_default_timeout(30000)
+            current_batch_size, batch_number = limits['warmup_batch_size'], 0
+            for q_idx, query in enumerate(queries, 1):
+                if len(results) >= max_leads: break
+                local['queries_started'] += 1; query_started = time.perf_counter(); unique_in_query = 0; qualified_before = len(results)
+                try:
+                    search_page.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=45000)
+                    feed = search_page.wait_for_selector('div[role="feed"]', timeout=15000)
+                    if not feed: continue
+                    limit, no_new, previous_cards, query_seen_hrefs = adaptive_query_limit(max_leads - len(results), limits['query_limit']), 0, 0, set()
+                    candidate_buffer = []
+                    for _ in range(limits['max_scrolls']):
+                        if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']: break
+                        snap_started = time.perf_counter()
+                        try:
+                            cards = extract_candidate_cards_snapshot(feed) if limits['card_snapshot'] else []
+                        except Exception:
+                            cards = []
+                        if not cards:
+                            links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
+                            cards = [{'href': link.get_attribute('href') or '', 'title': link.get_attribute('aria-label') or '', 'card_text': '', 'card_aria': ''} for link in links]
+                        local['candidate_snapshot_count'] += 1; local['candidate_snapshot_ms'].append((time.perf_counter() - snap_started) * 1000)
+                        new_count = 0
+                        for card in cards:
+                            href = card.get('href') or ''
+                            if not href or href in query_seen_hrefs or len(query_seen_hrefs) >= limit: continue
+                            query_seen_hrefs.add(href); local['candidate_cards_seen'] += 1
+                            text = f"{card.get('card_text', '')} {card.get('card_aria', '')}"
+                            item = {'href': href, 'title': card.get('title', ''), 'card_text': text,
+                                'rating': parse_rating(text), 'reviews_count': parse_reviews(text) if re.search(r'avaliações|reviews?', text, re.I) else None,
+                                'google_sponsored': bool(re.search(r'patrocinado', text, re.I))}
+                            identity = candidate_identity(item)
+                            if not identity or identity in seen_candidates: local['candidates_duplicate'] += 1; continue
+                            seen_candidates.add(identity); unique_in_query += 1; new_count += 1; local['candidates_unique'] += 1
+                            reason = _prequalify_card(item, category)
+                            if reason: local['candidates_rejected_pre_detail'] += 1; local['details_avoided'] += 1; continue
+                            local['candidates_prequalified'] += 1; candidate_buffer.append(item)
+                            if len(candidate_buffer) >= current_batch_size:
+                                batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number); candidate_buffer.clear()
+                                if len(results) >= max_leads: break
+                        if candidate_buffer and (len(cards) >= limit or no_new >= limits['max_no_new_scrolls']):
+                            batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number); candidate_buffer.clear()
+                        if len(results) >= max_leads or len(cards) >= limit: break
+                        no_new = no_new + 1 if new_count == 0 and len(cards) <= previous_cards else 0; previous_cards = len(cards)
+                        if no_new >= limits['max_no_new_scrolls']: break
+                        feed.evaluate('el => el.scrollTo(0, el.scrollHeight)'); search_page.mouse.wheel(0, 3500)
+                        try: search_page.wait_for_function('''([selector, count]) => document.querySelector(selector)?.querySelectorAll('a[href*="/maps/place/"]').length > count''', arg=['div[role="feed"]', len(cards)], timeout=limits['scroll_wait_ms'])
+                        except Exception: no_new += 1
+                    if candidate_buffer: batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number)
+                    conversion = (len(results) - qualified_before) / max(local['details_opened'], 1)
+                    if limits['dynamic_batch_size'] and batch_number:
+                        current_batch_size = next_detail_batch_size(local.get('last_conversion', conversion), limits['detail_batch_size'], True, limits['max_detail_batch_size'])
+                    local['queries_completed'] += 1
+                    query_metrics.append({'query': query, 'new_unique_candidates': unique_in_query, 'qualified_leads_generated': len(results) - qualified_before})
+                    sync_job_metrics(q_idx, force=True)
+                    if unique_in_query < limits['low_yield_threshold'] or len(results) == qualified_before: local.setdefault('low_yield', 0); local['low_yield'] += 1
+                    else: local['low_yield'] = 0
+                    if local.get('low_yield', 0) >= limits['max_low_yield_queries']: break
+                except Exception as exc:
+                    print(f"⚠️ Error collecting query '{query}': {exc}", flush=True)
+                finally:
+                    if job_dict is not None: job_dict['query_discovery_ms'] = round(job_dict.get('query_discovery_ms', 0.0) + (time.perf_counter() - query_started) * 1000, 2)
+            detail_page.close(); search_page.close(); browser.close()
+    finally:
+        if job_dict is not None:
+            elapsed = (time.perf_counter() - started) * 1000
+            for key, value in local.items():
+                if isinstance(value, (int, float)): job_dict[key] = value
+            job_dict.update({'leads': results, 'current_count': len(results), 'candidates_found': len(seen_candidates),
+                'qualified': len(results), 'details_skipped': local['details_avoided'], 'target_reached': len(results) >= max_leads,
+                'early_stop_triggered': len(results) >= max_leads, 'qualified_leads_per_minute': round(len(results) / max(elapsed / 60000, 0.001), 2),
+                'candidate_batch_avg_size': round(sum(local['batch_sizes']) / max(len(local['batch_sizes']), 1), 2),
+                'candidate_batch_max_size': max(local['batch_sizes'] or [0]), 'batch_conversion_rate': round(local.get('last_conversion', 0) * 100, 2),
+                'candidate_priority_used': bool(local['candidate_priority_used']), 'candidate_snapshot_ms': summarize_samples(local['candidate_snapshot_ms']),
+                'basic_detail_snapshot_fallbacks': local['basic_detail_snapshot_fallbacks'], 'manager_sync_count': local['manager_sync_count'],
+                'progress_sync_count': local['progress_sync_count'], 'query_metrics': query_metrics, 'scrape_total_ms': round(elapsed, 2)})
+            detail_summary = summarize_samples([sample.get('total_ms') for sample in detail_samples])
+            job_dict.update({'details_processed': len(detail_samples), 'details_qualified': len(results), 'detail_performance_samples': None,
+                'average_detail_ms': detail_summary['avg_ms'], 'p50_detail_ms': detail_summary['p50_ms'], 'p95_detail_ms': detail_summary['p95_ms'], 'max_detail_ms': detail_summary['max_ms'],
+                'basic_detail_snapshot_ms': summarize_samples(local['basic_detail_snapshot_ms']),
+                'candidate_batches_processed': local['candidate_batches_processed'],
+                'performance': {'detail': detail_summary, 'candidate_snapshot': job_dict['candidate_snapshot_ms'],
+                                'basic_detail_snapshot': summarize_samples(local['basic_detail_snapshot_ms'])}})
+            job_dict.pop('detail_performance_samples', None); sync_job_metrics(len(queries), force=True)
+            job_dict['status'] = 'running'
+    return results
+
+
 def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict, mode):
     limits = discovery_limits(max_leads)
+    if limits['pipeline_strategy'] == 'microbatch':
+        return _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode)
     initialize_discovery_metrics(job_dict, max_leads)
     results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
     queries = generate_query_variations(category, city, state)

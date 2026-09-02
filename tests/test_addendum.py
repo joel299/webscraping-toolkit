@@ -18,6 +18,10 @@ from src.gmaps_playwright_scraper import (
     parse_google_web_result_payload,
     parse_rating,
     parse_reviews,
+    candidate_priority_score,
+    extract_candidate_cards_snapshot,
+    extract_basic_place_snapshot,
+    next_detail_batch_size,
 )
 from src.gmaps_web_ui import make_payload
 
@@ -180,3 +184,40 @@ def test_detail_sample_summary_is_aggregated():
     assert summary['count'] == 3
     assert summary['min_ms'] == 100
     assert summary['max_ms'] == 400
+
+
+def test_microbatch_flags_and_adaptive_size(monkeypatch):
+    monkeypatch.setenv('SCRAPER_PIPELINE_STRATEGY', 'microbatch')
+    monkeypatch.setenv('SCRAPER_WARMUP_BATCH_SIZE', '2')
+    limits = discovery_limits(15)
+    assert limits['pipeline_strategy'] == 'microbatch'
+    assert limits['warmup_batch_size'] == 2
+    assert next_detail_batch_size(0.8) == 4
+    assert next_detail_batch_size(0.5) == 6
+    assert next_detail_batch_size(0.1) == 8
+    assert next_detail_batch_size(0.1, configured=99, dynamic=False) == 8
+
+
+def test_candidate_snapshot_is_plain_data_and_priority_does_not_filter():
+    class Feed:
+        def evaluate(self, script):
+            return [{'href': 'https://maps.google/x', 'title': 'Clínica', 'card_text': '4,8', 'card_aria': ''}]
+
+    snapshot = extract_candidate_cards_snapshot(Feed())
+    assert snapshot[0]['href'] == 'https://maps.google/x'
+    assert 'evaluate' not in snapshot[0]
+    assert candidate_priority_score({'title': 'Clínica', 'rating': None, 'reviews_count': None}) >= 0
+
+
+def test_basic_detail_snapshot_returns_expected_fields():
+    class Page:
+        url = 'https://maps.google.com/maps/place/Clinica/'
+
+        def evaluate(self, script):
+            return {'place_name': 'Clínica', 'total_score': '4.8', 'reviews_count': '(20)',
+                    'category': 'Clínica de estética', 'address': 'Rua A, 10',
+                    'phone_raw': '+55 67 99999-9999', 'website': '', 'plus_code': 'ABC'}
+
+    fields = extract_basic_place_snapshot(Page())
+    assert fields['place_name'] == 'Clínica'
+    assert fields['phone_raw'] == '+55 67 99999-9999'
