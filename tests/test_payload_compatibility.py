@@ -7,7 +7,13 @@ EXPECTED_N8N_LEAD_KEYS = {
     "instagram", "facebook", "linkedin", "emails", "razao_social", "cnpj",
     "representante_legal", "administrador", "situacao_cadastral", "data_abertura",
     "atividade_principal", "natureza_juridica", "quadro_societario",
-}
+ "google_sponsored",
+ "web_results",
+ "instagram_source",
+ "cnpj_source",
+ "qualification_status",
+ "qualification",
+ }
 
 
 def test_payload_compatibility_preserves_n8n_keys_in_fast_shape():

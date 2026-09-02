@@ -9,6 +9,21 @@ import urllib.request
 import urllib.parse
 from playwright.sync_api import sync_playwright
 
+TARGET_NICHE_POSITIVE_TERMS = (
+    'clinica de estetica', 'clínica de estética', 'clinica estetica', 'clínica estética',
+    'estetica avancada', 'estética avançada', 'medicina estetica', 'medicina estética',
+    'dermatologia estetica', 'dermatologia estética', 'clinica dermatologica', 'clínica dermatológica',
+    'harmonizacao facial', 'harmonização facial', 'harmonizacao orofacial', 'harmonização orofacial',
+    'estetica facial', 'estética facial', 'estetica corporal', 'estética corporal',
+    'dermatologista', 'rejuvenescimento', 'botox', 'toxina botulinica', 'toxina botulínica',
+    'preenchimento', 'bioestimulador', 'skinbooster', 'laser', 'depilacao a laser', 'depilação a laser',
+)
+TARGET_NICHE_NEGATIVE_TERMS = (
+    'estetica animal', 'estética animal', 'banho e tosa', 'banho e tosa', 'pet shop',
+    'veterinaria', 'veterinária', 'barbearia', 'barber shop', 'manicure', 'esmalteria',
+    'cabeleireiro', 'estetica automotiva', 'estética automotiva',
+)
+
 def only_digits(s):
     return re.sub(r'\D+', '', str(s or ''))
 
@@ -43,9 +58,33 @@ def parse_google_web_result_payload(payload):
     website = ''
     instagram = []
     cnpj = ''
-    for raw_url in links:
+    web_results = []
+    for raw_link in links:
+        if isinstance(raw_link, dict):
+            raw_url = raw_link.get('url') or raw_link.get('href') or ''
+            title = str(raw_link.get('title') or '').strip()
+            snippet = str(raw_link.get('snippet') or '').strip()
+        else:
+            raw_url = raw_link
+            title = ''
+            snippet = ''
         url = clean_google_redirect_url(raw_url)
         lower = url.lower()
+        parsed_url = urllib.parse.urlparse(url)
+        domain = parsed_url.netloc.lower().removeprefix('www.')
+        if not url or parsed_url.scheme not in ('http', 'https'):
+            continue
+        if 'instagram.com' in lower:
+            result_type = 'instagram'
+        elif any(domain_name in lower for domain_name in ('facebook.com', 'linkedin.com', 'youtube.com', 'tiktok.com')):
+            result_type = 'social'
+        elif any(domain_name in lower for domain_name in ('doctoralia.com', 'guiasaude', 'telelistas', 'yelp.com')):
+            result_type = 'directory'
+        elif 'google.com' in lower:
+            continue
+        else:
+            result_type = 'website'
+        web_results.append({'type': result_type, 'title': title, 'url': url, 'domain': domain, 'snippet': snippet})
         if 'instagram.com' in lower:
             if url not in instagram:
                 instagram.append(url)
@@ -60,10 +99,48 @@ def parse_google_web_result_payload(payload):
         digits = only_digits(match.group(0))
         if len(digits) == 14:
             cnpj = f'{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}'
-    return {'website': website, 'instagram': instagram, 'cnpj': cnpj}
+    return {'website': website, 'instagram': instagram, 'cnpj': cnpj, 'web_results': web_results}
+
+def classify_business_niche(candidate):
+    """Classify a Maps candidate using centralized positive/negative niche signals."""
+    text = ' '.join(str(candidate.get(key) or '') for key in ('title', 'place_name', 'category', 'card_text')).lower()
+    if any(term in text for term in TARGET_NICHE_NEGATIVE_TERMS):
+        return False
+    if any(term in text for term in TARGET_NICHE_POSITIVE_TERMS):
+        return True
+    # Generic "estética" is accepted until details provide a stronger signal.
+    return 'estetica' in text or 'estética' in text
+
+def parse_rating(value):
+    match = re.search(r'\b([0-5](?:[.,]\d)?)\b', str(value or ''))
+    return float(match.group(1).replace(',', '.')) if match else None
+
+def parse_reviews(value):
+    text = str(value or '').lower()
+    matches = list(re.finditer(r'(\d+(?:[.,]\d+)?)\s*(mil|k)?', text))
+    if not matches:
+        return None
+    match = matches[-1]
+    number = float(match.group(1).replace(',', '.'))
+    return int(number * 1000) if match.group(2) else int(number)
+
+def candidate_card_metadata(element):
+    """Read only metadata already rendered in a Maps result card."""
+    try:
+        return element.evaluate('''el => {
+            let root = el;
+            for (let i = 0; i < 5 && root.parentElement; i++) {
+                root = root.parentElement;
+                if (root.getAttribute('role') === 'article' || root.querySelector('[role="img"]')) break;
+            }
+            return {text: root.innerText || '', aria: root.getAttribute('aria-label') || ''};
+        }''') or {}
+    except Exception:
+        return {}
 
 def extract_google_web_results(page):
     """Read Google's optional "Resultados da Web" block without fixed XPaths."""
+    max_scrolls = max(0, int(os.environ.get('WEB_RESULTS_MAX_SCROLLS', '3')))
     try:
         payload = page.evaluate('''() => {
             const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
@@ -76,12 +153,23 @@ def extract_google_web_results(page):
             }
             return {
                 text: root.innerText || '',
-                links: [...root.querySelectorAll('a[href]')].map(a => a.href).filter(Boolean)
+                links: [...root.querySelectorAll('a[href]')].map(a => ({url: a.href, title: a.innerText || a.getAttribute('aria-label') || '', snippet: a.parentElement?.innerText || ''})).filter(x => x.url)
             };
         }''')
-        return parse_google_web_result_payload(payload)
+        result = parse_google_web_result_payload(payload)
+        for _ in range(max_scrolls):
+            if result['web_results']:
+                break
+            page.mouse.wheel(0, 500)
+            time.sleep(0.2)
+            payload = page.evaluate('''() => ({
+                text: document.body.innerText || '',
+                links: [...document.querySelectorAll('a[href]')].map(a => ({url: a.href, title: a.innerText || '', snippet: a.parentElement?.innerText || ''})).filter(x => x.url)
+            })''')
+            result = parse_google_web_result_payload(payload)
+        return result
     except Exception:
-        return {'website': '', 'instagram': [], 'cnpj': ''}
+        return {'website': '', 'instagram': [], 'cnpj': '', 'web_results': []}
 
 def resolve_shortener_url(url, timeout=3):
     if not url or not url.startswith('http'):
@@ -296,22 +384,21 @@ def extract_detail_from_place_page(page, fast=False):
         data['phone_raw'] = raw_phone
         data['whatsapp'] = format_whatsapp(raw_phone)
 
-    # 6. Website. FAST keeps the primary Maps website only and skips
-    # secondary web-result/social/CNPJ collection.
+    # 6. Website and results already rendered by Google Maps. This never
+    # opens the external website; FULL may still enrich it later.
     web_btn = page.query_selector('a[data-item-id="authority"], a[aria-label*="site"], a[aria-label*="Website"]')
     if web_btn:
         data['website'] = clean_google_redirect_url(web_btn.get_attribute('href') or '')
     else:
         data['website'] = ''
-    if not fast:
-        web_results = extract_google_web_results(page)
-        if not data['website']:
-            data['website'] = web_results['website']
-        data['instagram'] = web_results['instagram']
-        data['google_result_cnpj'] = web_results['cnpj']
-    else:
-        data['instagram'] = []
-        data['google_result_cnpj'] = ''
+    web_results = extract_google_web_results(page)
+    if not data['website']:
+        data['website'] = web_results['website']
+    data['instagram'] = web_results['instagram']
+    data['google_result_cnpj'] = web_results['cnpj']
+    data['web_results'] = web_results['web_results']
+    data['instagram_source'] = 'google_web_results' if data['instagram'] else ''
+    data['cnpj_source'] = 'google_web_results' if data['google_result_cnpj'] else ''
 
     # 7. Plus Code
     code_btn = page.query_selector('button[data-item-id="oloc"]')
@@ -452,11 +539,20 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                         for l in links:
                             href = l.get_attribute('href')
                             title = l.get_attribute('aria-label') or ''
+                            card = candidate_card_metadata(l)
+                            card_text = f"{card.get('text', '')} {card.get('aria', '')}"
                             if href and href in seen_urls:
                                 duplicates_removed += 1
                             elif href:
                                 seen_urls.add(href)
-                                place_items.append({'href': href, 'title': title})
+                                place_items.append({
+                                    'href': href,
+                                    'title': title,
+                                    'card_text': card_text,
+                                    'rating': parse_rating(card_text),
+                                    'reviews_count': parse_reviews(card_text),
+                                    'google_sponsored': bool(re.search(r'patrocinado', card_text, re.I)),
+                                })
                                 new_found = True
                                 if len(place_items) >= max_pool:
                                     break
@@ -511,6 +607,24 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     break
 
                 target_url = item['href']
+                candidate_for_filter = {'title': item.get('title'), 'category': category, 'card_text': item.get('card_text')}
+                if not classify_business_niche(candidate_for_filter):
+                    if job_dict:
+                        job_dict['rejected_category'] = int(job_dict.get('rejected_category', 0)) + 1
+                        job_dict['details_skipped'] = int(job_dict.get('details_skipped', 0)) + 1
+                    continue
+                if item.get('rating') is not None and item['rating'] < 4.5:
+                    if job_dict:
+                        job_dict['rejected_rating'] = int(job_dict.get('rejected_rating', 0)) + 1
+                        job_dict['details_skipped'] = int(job_dict.get('details_skipped', 0)) + 1
+                    continue
+                if item.get('reviews_count') is not None and item['reviews_count'] < 20:
+                    if job_dict:
+                        job_dict['rejected_reviews'] = int(job_dict.get('rejected_reviews', 0)) + 1
+                        job_dict['details_skipped'] = int(job_dict.get('details_skipped', 0)) + 1
+                    continue
+                if job_dict:
+                    job_dict['details_opened'] = int(job_dict.get('details_opened', 0)) + 1
                 print(f"--> Processing candidate {idx+1}/{len(place_items)}: {item['title']}", flush=True)
                 page_place = None
                 try:
@@ -526,8 +640,18 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     detail['city'] = city
                     detail['state'] = state
                     detail['country_code'] = 'BR'
+                    detail['google_sponsored'] = bool(item.get('google_sponsored'))
+                    detail['qualification_status'] = 'candidate'
 
                     wa = detail.get('whatsapp') or ''
+                    if mode == 'fast' and not wa:
+                        detail['qualification_status'] = 'rejected_whatsapp'
+                        if job_dict:
+                            job_dict['rejected_whatsapp'] = int(job_dict.get('rejected_whatsapp', 0)) + 1
+                            job_dict['without_whatsapp'] = int(job_dict.get('without_whatsapp', 0)) + 1
+                        continue
+                    detail['qualification_status'] = 'qualified'
+                    detail['with_whatsapp'] = bool(wa)
                     street = detail.get('street') or detail.get('address') or ''
                     place_key = f"{name}|{street}".lower()
 
@@ -599,6 +723,21 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
             job_dict['leads_with_phone'] = sum(bool(r.get('phone_raw')) for r in results)
             job_dict['leads_with_whatsapp'] = sum(bool(r.get('whatsapp')) for r in results)
             job_dict['leads_with_website'] = sum(bool(r.get('website')) for r in results)
+            job_dict['candidates_seen'] = len(place_items)
+            job_dict.setdefault('details_opened', 0)
+            job_dict.setdefault('details_skipped', 0)
+            job_dict['web_results_found'] = sum(bool(r.get('web_results')) for r in results)
+            job_dict['instagram_found_from_google'] = sum(bool(r.get('instagram_source') == 'google_web_results') for r in results)
+            job_dict['google_sponsored'] = sum(bool(r.get('google_sponsored')) for r in results)
+            job_dict['qualified'] = sum(r.get('qualification_status') == 'qualified' for r in results)
+            job_dict['pre_filter_rejection_rate'] = round(
+                ((job_dict.get('rejected_category', 0) + job_dict.get('rejected_rating', 0) + job_dict.get('rejected_reviews', 0)) / len(place_items)) * 100,
+                2,
+            ) if place_items else 0.0
+            job_dict['detail_open_rate'] = round((job_dict['details_opened'] / len(place_items)) * 100, 2) if place_items else 0.0
+            job_dict['instagram_google_discovery_rate'] = round((job_dict['instagram_found_from_google'] / len(results)) * 100, 2) if results else 0.0
+            job_dict['qualified_leads_per_minute'] = round(job_dict['qualified'] / max(job_dict.get('scrape_total_ms', 0) / 60000, 0.001), 2)
+            job_dict['sent_to_webhook'] = False
             job_dict['status'] = 'completed'
             job_dict['leads'] = results
             job_dict['current_count'] = len(results)

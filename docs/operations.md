@@ -41,3 +41,25 @@ ou enviando explicitamente `{"mode":"full","auto_enrich":true}`. O frontend
 envia FAST explicitamente para evitar que a captura inicial bloqueie em
 enrichment. A qualificação permanece disponível pelo endpoint manual de
 enrichment quando for desejada.
+
+## Addendum de pré-qualificação
+
+O FAST aplica filtros baratos antes de abrir detalhes: classificação de nicho,
+rating mínimo de `4.5` e mínimo de `20` avaliações quando esses valores estão
+disponíveis no card do Maps. O classificador usa sinais positivos e negativos
+centralizados em `gmaps_playwright_scraper.py`.
+
+Após abrir somente os candidatos elegíveis, o scraper lê o bloco semântico
+`Resultados da Web` no próprio painel do Maps, com até `WEB_RESULTS_MAX_SCROLLS`
+(padrão `3`) tentativas. Não abre websites externos nessa etapa. Os resultados
+são preservados em `web_results`; Instagram e CNPJ preliminar recebem a fonte
+`google_web_results`.
+
+O FAST marca candidatos sem WhatsApp como `rejected_whatsapp` para a campanha
+atual e não os envia no lote. Isso não apaga dados da base geral. FULL permanece
+sem esse filtro comercial e conserva o fluxo legado.
+
+Antes de promover uma alteração posterior, conferir no job as métricas de
+`details_skipped`, `details_opened`, `qualified`, `web_results_found` e
+`qualified_leads_per_minute`. Benchmark real deve usar endpoint autorizado e
+não deve persistir leads no repositório.

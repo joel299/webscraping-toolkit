@@ -399,6 +399,12 @@ def public_lead(item):
         'facebook': clean_social_list(item.get('facebook'), 'facebook'),
         'linkedin': clean_social_list(item.get('linkedin'), 'linkedin'),
         'emails': clean_email_list(item.get('emails')),
+        'google_sponsored': bool(item.get('google_sponsored', False)),
+        'web_results': item.get('web_results') or [],
+        'instagram_source': clean_text(item.get('instagram_source')),
+        'cnpj_source': clean_text(item.get('cnpj_source')),
+        'qualification_status': clean_text(item.get('qualification_status') or 'candidate'),
+        'qualification': clean_text(item.get('qualification')),
         'razao_social': clean_text(item.get('legal_name')),
         'cnpj': clean_text(item.get('cnpj')),
         'representante_legal': clean_text(item.get('owner_name')),
@@ -946,6 +952,7 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
             webhook_target = webhook_url or job_proxy.get('webhook') or DEFAULT_N8N_WEBHOOK
             if final_payload.get('leads') and webhook_target:
                 response = _send_webhook_once(job_proxy, final_payload, webhook_target)
+                job_proxy['sent_to_webhook'] = bool(response.get('ok'))
                 job_proxy['log'] = 'Coleta concluída e leads enviados para automação.' if response.get('ok') else 'Coleta concluída, mas o envio para automação falhou.'
             else:
                 job_proxy['n8n_response'] = {'ok': False, 'error': 'webhook não configurado ou payload sem leads'}
@@ -968,6 +975,8 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
 def start_enrichment_job(job_id, webhook_url=None):
     jobs_dict = get_jobs_dict()
     job = jobs_dict.get(job_id)
+    if job and job.get('mode') == 'fast':
+        return False
     if not job or not job.get('leads') or job.get('status') == 'enriching':
         return False
     webhook_url = webhook_url or job.get('webhook') or DEFAULT_N8N_WEBHOOK
@@ -1114,6 +1123,9 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
                 return
             if not job.get('leads'):
                 self.send_json({'error': 'job has no leads to enrich'}, 400)
+                return
+            if job.get('mode') == 'fast':
+                self.send_json({'error': 'enrichment is disabled for fast mode'}, 400)
                 return
             if job.get('status') == 'enriching':
                 self.send_json({'job_id': job_id, 'status': 'already_enriching'})
