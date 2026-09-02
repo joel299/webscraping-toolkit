@@ -7,10 +7,14 @@ import tempfile
 import threading
 import urllib.parse
 import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from threading import Thread
 
-import gmaps_playwright_scraper
+try:
+    from . import gmaps_playwright_scraper
+except ImportError:
+    import gmaps_playwright_scraper
 
 import multiprocessing
 
@@ -28,6 +32,9 @@ OMNIROUTE_TOKEN = os.environ.get("OMNIROUTE_TOKEN", "")
 DEFAULT_N8N_WEBHOOK = os.environ.get("N8N_WEBHOOK_URL", "")
 BRASILAPI_CNPJ_URL = os.environ.get("BRASILAPI_CNPJ_URL", "")
 BRASILAPI_MIN_INTERVAL_SECONDS = float(os.environ.get("BRASILAPI_MIN_INTERVAL_SECONDS", "3"))
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
+FIRECRAWL_API_URL = os.environ.get("FIRECRAWL_API_URL", "https://api.firecrawl.dev/v1/scrape")
 BRASILAPI_LOCK = threading.Lock()
 BRASILAPI_LAST_CALL = 0.0
 BRASILAPI_CACHE = {}
@@ -157,7 +164,7 @@ async function startExtraction(ev){
   setProgress(0, parseInt(el('max_leads').value, 10), 'Coleta');
   el('jobLog').textContent = 'Iniciando coleta no Google Maps via Playwright...';
 
-  var payload = { category: el('category').value, city: el('city').value, state: el('state').value, max_leads: parseInt(el('max_leads').value, 10), webhook: el('webhook').value };
+  var payload = { category: el('category').value, city: el('city').value, state: el('state').value, max_leads: parseInt(el('max_leads').value, 10), mode: 'fast', auto_enrich: false, webhook: el('webhook').value };
   try {
     var res = await fetch('/api/scrape', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     var data = await res.json();
@@ -202,7 +209,7 @@ async function pollJobStatus(){
       pollTimer = setTimeout(pollJobStatus, 1500);
     } else if (job.status === 'completed') {
       setBadge('Coleta concluída', 'ok');
-      if (currentLeads.length > 0 && !job.enrichment_started) {
+      if (currentLeads.length > 0 && job.mode === 'full' && job.auto_enrich === true && !job.enrichment_started) {
         el('jobLog').textContent = 'Coleta concluída. Iniciando qualificação automática...';
         startEnrichment();
       } else {
@@ -552,7 +559,47 @@ def apply_brasilapi_data(enriched, data):
         enriched['administrator_name'] = socios[0]['nome']
     return enriched
 
+def firecrawl_fetch_text(url):
+    """Use Firecrawl only when the local/browser path cannot read a site."""
+    if not FIRECRAWL_API_KEY or not url:
+        return ''
+    payload = json.dumps({'url': url, 'formats': ['markdown']}).encode('utf-8')
+    req = urllib.request.Request(
+        FIRECRAWL_API_URL,
+        data=payload,
+        headers={'Authorization': f'Bearer {FIRECRAWL_API_KEY}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            result = data.get('data') or data.get('result') or data
+            return clean_text((result or {}).get('markdown') or (result or {}).get('content'))
+    except Exception:
+        return ''
+
 def omniroute_search(query, max_results=5, provider=None):
+    if SERPER_API_KEY and not provider:
+        req = urllib.request.Request(
+            'https://google.serper.dev/search',
+            data=json.dumps({'q': query, 'num': max_results}, ensure_ascii=False).encode('utf-8'),
+            headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                return {
+                    'provider': 'serper',
+                    'results': [
+                        {'title': x.get('title', ''), 'url': x.get('link', ''), 'snippet': x.get('snippet', '')}
+                        for x in data.get('organic', [])
+                    ],
+                }
+        except Exception:
+            pass
+    if not OMNIROUTE_URL or not OMNIROUTE_TOKEN:
+        return {}
     providers_to_try = [provider] if provider else [None, 'serper-search', 'duckduckgo-free']
     last_res = {}
     for p in providers_to_try:
@@ -680,26 +727,35 @@ def enrich_lead_with_omniroute(lead, city, state):
     enriched['linkedin'] = clean_social_list(enriched.get('linkedin'), 'linkedin')
     enriched['emails'] = clean_email_list(enriched.get('emails'))
 
+    # Google Maps is the primary source. Do not spend external quota for
+    # fields already present in the Maps profile or its web-results block.
+    google_cnpj = clean_text(enriched.get('google_result_cnpj'))
+    if google_cnpj and not enriched.get('cnpj'):
+        enriched['cnpj'] = format_cnpj(google_cnpj)
+
     search_ids = []
     provider = ''
-    for q in queries:
-        try:
-            response = omniroute_search(q, max_results=5)
-            provider = response.get('provider') or provider
-            if response.get('id'):
-                search_ids.append(response.get('id'))
-            chunks = [json.dumps(response.get('answer') or '', ensure_ascii=False)]
-            for result in response.get('results') or []:
-                chunks.append(' '.join(clean_text(result.get(k)) for k in ('title', 'url', 'snippet', 'description', 'content')))
-            parsed = parse_enrichment_text('\n'.join(chunks))
-            enriched = merge_parsed(enriched, parsed)
-            if enriched.get('cnpj') and (enriched.get('legal_name') or enriched.get('owner_name')):
-                break
-            time.sleep(0.5)
-        except Exception as exc:
-            enriched['enrichment_error'] = str(exc)
+    if not (enriched.get('cnpj') and enriched.get('website') and enriched.get('instagram')):
+        for q in queries:
+            try:
+                response = omniroute_search(q, max_results=5)
+                provider = response.get('provider') or provider
+                if response.get('id'):
+                    search_ids.append(response.get('id'))
+                chunks = [json.dumps(response.get('answer') or '', ensure_ascii=False)]
+                for result in response.get('results') or []:
+                    chunks.append(' '.join(clean_text(result.get(k)) for k in ('title', 'url', 'snippet', 'description', 'content')))
+                parsed = parse_enrichment_text('\n'.join(chunks))
+                enriched = merge_parsed(enriched, parsed)
+                if enriched.get('cnpj') and enriched.get('website') and enriched.get('instagram'):
+                    break
+                time.sleep(0.5)
+            except Exception as exc:
+                enriched['enrichment_error'] = str(exc)
     if not enriched.get('cnpj') and enriched.get('website'):
         web_text = fetch_website_content(enriched.get('website'))
+        if not web_text:
+            web_text = firecrawl_fetch_text(enriched.get('website'))
         if web_text:
             parsed_web = parse_enrichment_text(web_text)
             enriched = merge_parsed(enriched, parsed_web)
@@ -754,6 +810,25 @@ def make_payload(job):
         'leads': leads,
     }
 
+def _mark_timing(job, prefix, started=False):
+    if started:
+        job[f'{prefix}_started_at'] = time.time()
+    else:
+        job[f'{prefix}_finished_at'] = time.time()
+
+def _send_webhook_once(job, payload, webhook_url):
+    if job.get('webhook_sent'):
+        return job.get('n8n_response') or {'ok': True, 'duplicate_prevented': True}
+    if not webhook_url:
+        return {'ok': False, 'error': 'webhook não configurado'}
+    _mark_timing(job, 'webhook', started=True)
+    response = send_to_n8n(payload, webhook_url)
+    _mark_timing(job, 'webhook')
+    job['webhook_ms'] = round((job['webhook_finished_at'] - job['webhook_started_at']) * 1000, 2)
+    job['n8n_response'] = response
+    job['webhook_sent'] = bool(response.get('ok'))
+    return response
+
 
 class JobProxy(dict):
     def __init__(self, job_id, jobs_dict, initial_data):
@@ -781,6 +856,7 @@ def run_enrich_inline(job_proxy, webhook_url=None):
         job_proxy.sync()
         return
 
+    job_proxy['enrichment_started_at'] = time.time()
     job_proxy['status'] = 'enriching'
     job_proxy['phase'] = 'enrich'
     job_proxy['enrichment_started'] = True
@@ -833,13 +909,17 @@ def run_enrich_inline(job_proxy, webhook_url=None):
         else:
             try:
                 webhook_target = webhook_url or job_proxy.get('webhook') or DEFAULT_N8N_WEBHOOK
-                sent_ok = send_to_n8n(final_payload, webhook_target)
-                job_proxy['n8n_response'] = {'ok': sent_ok}
-                job_proxy['webhook_sent'] = bool(sent_ok)
+                response = _send_webhook_once(job_proxy, final_payload, webhook_target)
+                job_proxy['n8n_response'] = response
+                job_proxy['webhook_sent'] = bool(response.get('ok'))
             except Exception as exc:
                 job_proxy['n8n_response'] = {'ok': False, 'error': str(exc)}
                 job_proxy['webhook_sent'] = False
-            job_proxy['log'] = 'Leads qualificados enviados para automação.' if job_proxy.get('webhook_sent') else 'Leads qualificados, mas o envio para automação falhou.'
+            job_proxy['enrichment_finished_at'] = time.time()
+        job_proxy['enrichment_ms'] = round((job_proxy['enrichment_finished_at'] - job_proxy['enrichment_started_at']) * 1000, 2)
+        job_proxy['log'] = 'Leads qualificados enviados para automação.' if job_proxy.get('webhook_sent') else 'Leads qualificados, mas o envio para automação falhou.'
+        if job_proxy.get('job_started_at'):
+            job_proxy['total_pipeline_ms'] = round((time.time() - job_proxy['job_started_at']) * 1000, 2)
         job_proxy.sync()
 
     except Exception as exc:
@@ -848,19 +928,37 @@ def run_enrich_inline(job_proxy, webhook_url=None):
         job_proxy['log'] = 'Erro na qualificação: ' + str(exc)
         job_proxy.sync()
 
-def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict):
+def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full'):
     initial_job = dict(jobs_dict.get(job_id) or {})
     job_proxy = JobProxy(job_id, jobs_dict, initial_job)
     try:
-        leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy)
+        leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy, mode=mode)
         job_proxy['leads'] = leads or job_proxy.get('leads') or []
         job_proxy['current_count'] = len(job_proxy['leads'])
         job_proxy['status'] = 'completed'
         job_proxy['phase'] = 'scrape'
         job_proxy['finished_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
-        job_proxy['log'] = f'Coleta concluída: {len(job_proxy["leads"])} leads. Iniciando qualificação automática...'
+        job_proxy['log'] = f'Coleta concluída: {len(job_proxy["leads"])} leads.'
         job_proxy.sync()
-        run_enrich_inline(job_proxy, webhook_url)
+        if mode == 'fast':
+            final_payload = make_payload(job_proxy)
+            job_proxy['payload'] = final_payload
+            webhook_target = webhook_url or job_proxy.get('webhook') or DEFAULT_N8N_WEBHOOK
+            if final_payload.get('leads') and webhook_target:
+                response = _send_webhook_once(job_proxy, final_payload, webhook_target)
+                job_proxy['log'] = 'Coleta concluída e leads enviados para automação.' if response.get('ok') else 'Coleta concluída, mas o envio para automação falhou.'
+            else:
+                job_proxy['n8n_response'] = {'ok': False, 'error': 'webhook não configurado ou payload sem leads'}
+                job_proxy['webhook_sent'] = False
+            if job_proxy.get('job_started_at'):
+                job_proxy['total_pipeline_ms'] = round((time.time() - job_proxy['job_started_at']) * 1000, 2)
+            job_proxy['job_finished_at'] = time.time()
+            job_proxy.sync()
+        elif job_proxy.get('auto_enrich', True):
+            run_enrich_inline(job_proxy, webhook_url)
+        else:
+            job_proxy['log'] = 'Coleta concluída. Enriquecimento aguardando acionamento manual.'
+            job_proxy.sync()
     except Exception as exc:
         job_proxy['status'] = 'error'
         job_proxy['error'] = str(exc)
@@ -993,11 +1091,16 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             category = payload.get('category') or 'estética'
             city = payload.get('city') or 'Campo Grande'
             state = payload.get('state') or 'Mato Grosso do Sul'
-            max_leads = int(payload.get('max_leads') or 15)
+            max_leads = max(1, min(int(payload.get('max_leads') or 15), 500))
+            mode = str(payload.get('mode') or os.environ.get('SCRAPER_DEFAULT_MODE', 'fast')).lower()
+            if mode not in ('full', 'fast'):
+                self.send_json({'error': 'mode must be full or fast'}, 400)
+                return
+            auto_enrich = payload.get('auto_enrich', mode == 'full') is True
             webhook_url = payload.get('webhook') or DEFAULT_N8N_WEBHOOK
-            jobs_dict[job_id] = {'job_id': job_id, 'status': 'pending', 'phase': 'scrape', 'category': category, 'city': city, 'state': state, 'max_leads': max_leads, 'webhook': webhook_url, 'current_count': 0, 'leads': [], 'log': 'Aguardando início da coleta...'}
+            jobs_dict[job_id] = {'job_id': job_id, 'status': 'pending', 'phase': 'scrape', 'mode': mode, 'auto_enrich': auto_enrich, 'category': category, 'city': city, 'state': state, 'max_leads': max_leads, 'webhook': webhook_url, 'current_count': 0, 'leads': [], 'log': 'Aguardando início da coleta...'}
 
-            proc = multiprocessing.Process(target=worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict), daemon=True)
+            proc = multiprocessing.Process(target=worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode), daemon=True)
             proc.start()
             self.send_json({'job_id': job_id, 'status': 'started'})
             return

@@ -35,6 +35,54 @@ def clean_google_redirect_url(url):
     m = re.search(r'https?://[^\s`"<>]+', url)
     return m.group(0).rstrip(').,;]') if m else url
 
+def parse_google_web_result_payload(payload):
+    """Normalize the useful fields from Google's in-place web results block."""
+    payload = payload or {}
+    text = str(payload.get('text') or '')
+    links = payload.get('links') or []
+    website = ''
+    instagram = []
+    cnpj = ''
+    for raw_url in links:
+        url = clean_google_redirect_url(raw_url)
+        lower = url.lower()
+        if 'instagram.com' in lower:
+            if url not in instagram:
+                instagram.append(url)
+        elif not website and urllib.parse.urlparse(url).scheme in ('http', 'https'):
+            if not any(domain in lower for domain in (
+                'google.com', 'facebook.com', 'linkedin.com', 'youtube.com',
+                'tiktok.com', 'twitter.com', 'x.com', 'instagram.com',
+            )):
+                website = url
+    match = re.search(r'\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b', text)
+    if match:
+        digits = only_digits(match.group(0))
+        if len(digits) == 14:
+            cnpj = f'{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}'
+    return {'website': website, 'instagram': instagram, 'cnpj': cnpj}
+
+def extract_google_web_results(page):
+    """Read Google's optional "Resultados da Web" block without fixed XPaths."""
+    try:
+        payload = page.evaluate('''() => {
+            const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
+            const heading = headings.find(el => /resultados da web/i.test(el.innerText || ''));
+            if (!heading) return {text: '', links: []};
+            let root = heading;
+            for (let i = 0; i < 5 && root.parentElement; i++) {
+                root = root.parentElement;
+                if (root.querySelectorAll('a[href]').length >= 1) break;
+            }
+            return {
+                text: root.innerText || '',
+                links: [...root.querySelectorAll('a[href]')].map(a => a.href).filter(Boolean)
+            };
+        }''')
+        return parse_google_web_result_payload(payload)
+    except Exception:
+        return {'website': '', 'instagram': [], 'cnpj': ''}
+
 def resolve_shortener_url(url, timeout=3):
     if not url or not url.startswith('http'):
         return url
@@ -169,8 +217,9 @@ def enrich_with_cnpj_and_owner(context, lead):
     lead['cnpj'] = cnpj
     return lead
 
-def extract_detail_from_place_page(page):
-    time.sleep(2.0)
+def extract_detail_from_place_page(page, fast=False):
+    if not fast:
+        time.sleep(2.0)
     data = {}
 
     # 1. Place Name
@@ -247,12 +296,22 @@ def extract_detail_from_place_page(page):
         data['phone_raw'] = raw_phone
         data['whatsapp'] = format_whatsapp(raw_phone)
 
-    # 6. Website
+    # 6. Website. FAST keeps the primary Maps website only and skips
+    # secondary web-result/social/CNPJ collection.
     web_btn = page.query_selector('a[data-item-id="authority"], a[aria-label*="site"], a[aria-label*="Website"]')
     if web_btn:
         data['website'] = clean_google_redirect_url(web_btn.get_attribute('href') or '')
     else:
         data['website'] = ''
+    if not fast:
+        web_results = extract_google_web_results(page)
+        if not data['website']:
+            data['website'] = web_results['website']
+        data['instagram'] = web_results['instagram']
+        data['google_result_cnpj'] = web_results['cnpj']
+    else:
+        data['instagram'] = []
+        data['google_result_cnpj'] = ''
 
     # 7. Plus Code
     code_btn = page.query_selector('button[data-item-id="oloc"]')
@@ -314,17 +373,21 @@ def generate_query_variations(category, city, state):
             result.append(q)
     return result
 
-def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None):
+def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None, mode='full'):
     print(f"DEBUG: Starting scrape_gmaps with max_leads={max_leads}, webhook_url={webhook_url}", flush=True)
+    job_started = time.perf_counter()
     if job_dict is not None:
         job_dict['status'] = 'running'
         job_dict['started_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        job_dict['job_started_at'] = time.time()
+        job_dict['mode'] = mode
         job_dict['last_activity'] = time.time()
 
     results = []
     seen_urls = set()
     seen_places = set()
     seen_phones = set()
+    duplicates_removed = 0
 
     try:
         with sync_playwright() as p:
@@ -345,6 +408,9 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
             context.on("page", lambda new_p: new_p.on("dialog", lambda d: d.dismiss()))
 
             # Step 1: Collect place URLs from feed using multi-query expansion
+            candidate_started = time.perf_counter()
+            if job_dict:
+                job_dict['candidate_search_started_at'] = time.time()
             queries_to_run = generate_query_variations(category, city, state) if max_leads > 35 else [f"{category} {city} {state}"]
             place_items = []
             max_pool = max(max_leads * 3, 30)
@@ -370,30 +436,38 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                         continue
 
                     feed = page_search.query_selector('div[role="feed"]')
+                    if not feed:
+                        print(f"⚠️ Feed disappeared for query '{q_str}', skipping...", flush=True)
+                        continue
                     consecutive_no_new = 0
-                    for scroll_step in range(15):
+                    previous_count = 0
+                    for scroll_step in range(60):
                         if job_dict:
                             job_dict['log'] = f"Buscando candidatos {q_idx+1}/{len(queries_to_run)}: {len(place_items)}/{max_pool} candidatos"
                             job_dict['last_activity'] = time.time()
                         if len(place_items) >= max_pool:
                             break
-                        links = feed.query_selector_all('a.hfpxzc')
+                        links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
                         new_found = False
                         for l in links:
                             href = l.get_attribute('href')
                             title = l.get_attribute('aria-label') or ''
-                            if href and href not in seen_urls:
+                            if href and href in seen_urls:
+                                duplicates_removed += 1
+                            elif href:
                                 seen_urls.add(href)
                                 place_items.append({'href': href, 'title': title})
                                 new_found = True
                                 if len(place_items) >= max_pool:
                                     break
-                        if not new_found:
+                        current_count = len(place_items)
+                        if not new_found and current_count <= previous_count:
                             consecutive_no_new += 1
                         else:
                             consecutive_no_new = 0
+                        previous_count = current_count
 
-                        if consecutive_no_new >= 4:
+                        if consecutive_no_new >= 5:
                             break
 
                         if links:
@@ -402,9 +476,15 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                             except Exception:
                                 pass
                         feed.hover()
-                        page_search.mouse.wheel(0, 5000)
-                        page_search.keyboard.press('PageDown')
-                        time.sleep(1.5)
+                        feed.evaluate('el => el.scrollTo(0, el.scrollHeight)')
+                        page_search.mouse.wheel(0, 3500)
+                        try:
+                            page_search.wait_for_function(
+                                '''([selector, count]) => document.querySelector(selector)?.querySelectorAll('a[href*="/maps/place/"]').length > count''',
+                                arg=['div[role="feed"]', len(links)], timeout=4000
+                            )
+                        except Exception:
+                            time.sleep(1.0)
                 except Exception as ex_q:
                     print(f"⚠️ Error collecting from query '{q_str}': {ex_q}", flush=True)
                 finally:
@@ -414,7 +494,13 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                         except Exception:
                             pass
 
-            print(f"📌 Collected {len(place_items)} place URLs across {len(queries_to_run)} queries. Extracting details for target {max_leads}...", flush=True)
+            candidate_finished = time.perf_counter()
+            if job_dict:
+                job_dict['candidate_search_finished_at'] = time.time()
+                job_dict['candidate_search_ms'] = round((candidate_finished - candidate_started) * 1000, 2)
+                job_dict['candidates_found'] = len(place_items)
+                job_dict['duplicates_removed'] = duplicates_removed
+                job_dict['details_started_at'] = time.time()
             if job_dict:
                 job_dict['log'] = f"{len(place_items)} candidatos coletados. Extraindo detalhes..."
                 job_dict['last_activity'] = time.time()
@@ -433,7 +519,7 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     page_place.on("dialog", lambda d: d.dismiss())
 
                     page_place.goto(target_url, wait_until="commit", timeout=10000)
-                    detail = extract_detail_from_place_page(page_place)
+                    detail = extract_detail_from_place_page(page_place, fast=mode == 'fast')
 
                     name = detail.get('place_name') or item.get('title') or f"Estabelecimento {idx+1}"
                     detail['place_name'] = name
@@ -455,18 +541,27 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     if wa:
                         seen_phones.add(wa)
 
-                    # Step 3: Scrape website for social networks (Instagram, Facebook, LinkedIn, Emails)
-                    website_url = detail.get('website') or ''
-                    socials = extract_socials_from_website(context, website_url)
-                    detail['instagram'] = socials['instagram']
-                    detail['facebook'] = socials['facebook']
-                    detail['linkedin'] = socials['linkedin']
-                    detail['emails'] = socials['emails']
+                    # Step 3: Secondary website/social scraping remains part
+                    # of FULL only. FAST returns the same schema with blanks.
+                    if mode == 'fast':
+                        detail['instagram'] = []
+                        detail['facebook'] = []
+                        detail['linkedin'] = []
+                        detail['emails'] = []
+                    else:
+                        website_url = detail.get('website') or ''
+                        socials = extract_socials_from_website(context, website_url)
+                        detail['instagram'] = list(dict.fromkeys((detail.get('instagram') or []) + socials['instagram']))
+                        detail['facebook'] = socials['facebook']
+                        detail['linkedin'] = socials['linkedin']
+                        detail['emails'] = socials['emails']
 
                     detail.setdefault('owner_name', '')
                     detail.setdefault('administrator_name', '')
                     detail.setdefault('legal_name', '')
                     detail.setdefault('cnpj', '')
+                    if mode != 'fast' and detail.get('google_result_cnpj') and not detail['cnpj']:
+                        detail['cnpj'] = detail['google_result_cnpj']
 
                     raw_gmaps_url = detail.get('google_maps_url') or target_url
                     m_url = re.search(r'https?://[^\s`"]+', raw_gmaps_url)
@@ -475,12 +570,14 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     results.append(detail)
 
                     if job_dict:
+                        if len(results) == 1 and job_dict.get('job_started_at'):
+                            job_dict['time_to_first_lead_ms'] = round((time.time() - job_dict['job_started_at']) * 1000, 2)
                         job_dict['leads'] = json.loads(json.dumps(results, ensure_ascii=False))
                         job_dict['current_count'] = len(results)
                         job_dict['log'] = f"Extraído {len(results)}/{max_leads}: {name} (Fone: {wa or 'N/A'})"
                         job_dict['last_activity'] = time.time()
 
-                    print(f"✅ [{len(results)}/{max_leads}] Extracted: {name} | Fone: {wa} | Insta: {len(socials['instagram'])}", flush=True)
+                    print(f"✅ [{len(results)}/{max_leads}] Extracted: {name} | Fone: {wa} | Insta: {len(detail.get('instagram') or [])}", flush=True)
 
                 except Exception as ex_place:
                     print(f"⚠️ Error extracting place {target_url}: {ex_place}", flush=True)
@@ -494,6 +591,14 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
             browser.close()
 
         if job_dict:
+            job_dict['details_finished_at'] = time.time()
+            job_dict['details_ms'] = round((time.perf_counter() - candidate_finished) * 1000, 2)
+            job_dict['scrape_total_ms'] = round((time.perf_counter() - job_started) * 1000, 2)
+            job_dict['job_finished_at'] = time.time()
+            job_dict['leads_extracted'] = len(results)
+            job_dict['leads_with_phone'] = sum(bool(r.get('phone_raw')) for r in results)
+            job_dict['leads_with_whatsapp'] = sum(bool(r.get('whatsapp')) for r in results)
+            job_dict['leads_with_website'] = sum(bool(r.get('website')) for r in results)
             job_dict['status'] = 'completed'
             job_dict['leads'] = results
             job_dict['current_count'] = len(results)

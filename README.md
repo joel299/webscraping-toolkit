@@ -76,6 +76,7 @@ Nunca versione `.env`. Variáveis principais:
 - `OMNIROUTE_URL` e `OMNIROUTE_RESPONSES_URL`: endpoints do serviço de enriquecimento, quando utilizado.
 - `OMNIROUTE_TOKEN`: token do serviço de enriquecimento, quando utilizado.
 - `N8N_WEBHOOK_URL`: webhook externo de destino; opcional.
+- `SCRAPER_DEFAULT_MODE`: modo padrão da API (`fast`; use `full` somente quando enrichment for explicitamente desejado).
 - `BRASILAPI_CNPJ_URL`: endpoint da API de CNPJ, quando utilizado.
 - `BRASILAPI_MIN_INTERVAL_SECONDS`: intervalo mínimo entre consultas de CNPJ.
 - `SCRAPER_API_BASE_URL`: URL da API do Scraper Studio para o monitor de jobs.
@@ -115,6 +116,29 @@ Validação mínima antes de abrir um pull request:
 python -m compileall -q src
 python -m pytest -q
 ```
+
+### Benchmark da Etapa 1
+
+O modo `fast` mantém o contrato de payload do n8n, mas não executa
+enriquecimento, abertura dos websites para redes sociais, BrasilAPI, OmniRoute
+ou LLM durante a captura. O modo `full` permanece disponível e é o padrão.
+
+Execute o benchmark em uma infraestrutura autorizada. O webhook é opcional;
+para validar HTTP 2xx, informe um endpoint de teste controlado:
+
+```bash
+python scripts/benchmark_scraper.py \
+  --category "clínica de estética" \
+  --city "Campo Grande" \
+  --state "Mato Grosso do Sul" \
+  --max-leads 50 \
+  --mode fast \
+  --runs 3 \
+  --webhook "$N8N_WEBHOOK_URL"
+```
+
+O script imprime somente métricas agregadas na saída. Não salve a saída com
+leads reais no repositório.
 
 ## Licença
 

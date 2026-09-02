@@ -11,13 +11,29 @@ Stark Scraper Studio (:8990)
     +--> worker multiprocessing
     |       |
     |       +--> Google Maps via Playwright
-    |       +--> coleta de detalhes
-    |       +--> enriquecimento opcional
+    |       +--> coleta de detalhes (FULL ou FAST)
+    |       +--> enriquecimento opcional (somente FULL/acionado)
     |
     +--> estado temporário dos jobs
     |
     +--> webhook/MCP externo (opcional)
 ```
+
+## Modos compatíveis
+
+`POST /api/scrape` aceita `mode=full` e `mode=fast`. A ausência de `mode`
+resolve para `SCRAPER_DEFAULT_MODE`, cujo fallback é `fast`.
+
+- **FULL**: fluxo legado, incluindo qualificação automática quando
+  `auto_enrich=true`.
+- **FAST**: coleta candidatos e detalhes principais do Google Maps, deduplica,
+  monta o mesmo schema público e entrega ao webhook uma única vez. Campos de
+  redes sociais, e-mails e dados cadastrais ficam vazios.
+
+O job expõe métricas monotônicas convertidas em milissegundos (`candidate_search_ms`,
+`details_ms`, `scrape_total_ms`, `enrichment_ms`, `webhook_ms` e
+`total_pipeline_ms`) e contadores de qualidade. Essas métricas são internas e
+não alteram o payload enviado ao n8n.
 
 ## Módulos
 
