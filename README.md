@@ -77,6 +77,14 @@ Nunca versione `.env`. Variáveis principais:
 - `OMNIROUTE_TOKEN`: token do serviço de enriquecimento, quando utilizado.
 - `N8N_WEBHOOK_URL`: webhook externo de destino; opcional.
 - `SCRAPER_DEFAULT_MODE`: modo padrão da API (`fast`; use `full` somente quando enrichment for explicitamente desejado).
+
+O FAST usa descoberta incremental por query, com early stop ao atingir
+`max_leads`, deduplicação e pré-filtro antes dos detalhes. Os limites podem ser
+ajustados por `SCRAPER_OVERSAMPLING_FACTOR`, `SCRAPER_QUERY_CANDIDATE_LIMIT`,
+`SCRAPER_MAX_SCROLLS_PER_QUERY`, `SCRAPER_SCROLL_WAIT_MS`,
+`SCRAPER_MAX_NO_NEW_SCROLLS`, `SCRAPER_LOW_YIELD_QUERY_THRESHOLD`,
+`SCRAPER_MAX_LOW_YIELD_QUERIES` e `SCRAPER_REUSE_DETAIL_PAGE`. O FULL continua
+com o fluxo legado.
 - `WEB_RESULTS_MAX_SCROLLS`: tentativas de scroll do painel semântico `Resultados da Web` (padrão `3`).
 - `BRASILAPI_CNPJ_URL`: endpoint da API de CNPJ, quando utilizado.
 - `BRASILAPI_MIN_INTERVAL_SECONDS`: intervalo mínimo entre consultas de CNPJ.

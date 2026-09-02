@@ -1,5 +1,13 @@
 from src.gmaps_playwright_scraper import (
+    adaptive_query_limit,
+    candidate_identity,
     classify_business_niche,
+    discovery_limits,
+    discovery_should_stop,
+    generate_query_variations,
+    low_yield_should_stop,
+    preserve_google_instagram,
+    _prequalify_card,
     parse_google_web_result_payload,
     parse_rating,
     parse_reviews,
@@ -61,3 +69,45 @@ def test_payload_preserves_legacy_and_addendum_fields():
     assert lead['google_sponsored'] is True
     assert lead['web_results'][0]['type'] == 'instagram'
     assert lead['qualification_status'] == 'qualified'
+
+
+def test_incremental_discovery_defaults_and_adaptive_limit(monkeypatch):
+    for key in ('SCRAPER_OVERSAMPLING_FACTOR', 'SCRAPER_QUERY_CANDIDATE_LIMIT', 'SCRAPER_MAX_SCROLLS_PER_QUERY', 'SCRAPER_SCROLL_WAIT_MS', 'SCRAPER_MAX_NO_NEW_SCROLLS', 'SCRAPER_LOW_YIELD_QUERY_THRESHOLD', 'SCRAPER_MAX_LOW_YIELD_QUERIES', 'SCRAPER_REUSE_DETAIL_PAGE'):
+        monkeypatch.delenv(key, raising=False)
+    limits = discovery_limits(100)
+    assert limits['max_pool'] == 150
+    assert limits['query_limit'] == 50
+    assert limits['max_scrolls'] == 18
+    assert limits['scroll_wait_ms'] == 1500
+    assert limits['max_no_new_scrolls'] == 3
+    assert adaptive_query_limit(10, 50) == 20
+    assert adaptive_query_limit(70, 50) == 50
+
+
+def test_incremental_discovery_stop_and_low_yield_rules():
+    assert discovery_should_stop(10, 10) is True
+    assert discovery_should_stop(9, 10) is False
+    assert low_yield_should_stop(1, 5, 2) is False
+    assert low_yield_should_stop(2, 5, 2) is True
+
+
+def test_prequalification_happens_before_details_and_identity_is_stable():
+    rejected = {'title': 'Clínica de Estética', 'card_text': '4,2 · 8 avaliações', 'rating': 4.2, 'reviews_count': 8}
+    assert _prequalify_card(rejected, 'estética') == 'rating'
+    accepted = {'title': 'Clínica de Estética', 'card_text': '4,8 · 80 avaliações', 'rating': 4.8, 'reviews_count': 80}
+    assert _prequalify_card(accepted, 'estética') == ''
+    item = {'href': 'https://www.google.com/maps/place/X/?q=1', 'title': 'X'}
+    assert candidate_identity(item) == candidate_identity({'href': item['href'], 'title': 'X diferente'})
+
+
+def test_aesthetic_query_order_prioritizes_high_intent():
+    queries = generate_query_variations('estética', 'Campo Grande', 'Mato Grosso do Sul')
+    assert queries[0].startswith('clínica de estética Campo Grande')
+    assert any('harmonização facial' in query for query in queries[:4])
+
+
+def test_fast_preserves_instagram_found_by_google_results():
+    assert preserve_google_instagram([
+        'https://www.instagram.com/empresa/',
+        'https://www.instagram.com/empresa/',
+    ]) == ['https://www.instagram.com/empresa/']

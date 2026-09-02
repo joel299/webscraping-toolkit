@@ -42,6 +42,22 @@ avaliações também são rejeitados antes da navegação. O FAST rejeita da cam
 leads sem WhatsApp após os detalhes; isso não remove o registro de uma base
 futura.
 
+## Descoberta incremental de performance
+
+No FAST, a descoberta é consumida query por query: os cards da query atual são
+deduplicados, pré-qualificados e enviados imediatamente para detalhes. A próxima
+query só começa quando ainda faltam leads. O limite de proteção usa
+`SCRAPER_OVERSAMPLING_FACTOR` (padrão `1.5`), mas não bloqueia o processamento
+incremental. Cada query respeita `SCRAPER_QUERY_CANDIDATE_LIMIT`,
+`SCRAPER_MAX_SCROLLS_PER_QUERY`, `SCRAPER_SCROLL_WAIT_MS` e
+`SCRAPER_MAX_NO_NEW_SCROLLS`.
+
+Quando `max_leads` é atingido, o FAST encerra discovery e detalhes imediatamente
+(`early_stop_triggered=true`), atualiza o job com os leads já capturados e deixa
+o envio único ao webhook para a etapa final existente. Duas queries consecutivas
+abaixo de `SCRAPER_LOW_YIELD_QUERY_THRESHOLD` encerram a expansão adaptativa.
+O FULL mantém o fluxo legado.
+
 O bloco `Resultados da Web` produz `web_results` com tipo, título, URL, domínio e
 snippet. Instagram e CNPJ encontrados ali recebem, respectivamente,
 `instagram_source` e `cnpj_source` iguais a `google_web_results`. O indicador

@@ -124,6 +124,77 @@ def parse_reviews(value):
     number = float(match.group(1).replace(',', '.'))
     return int(number * 1000) if match.group(2) else int(number)
 
+
+def scraper_int_env(name, default, minimum=0):
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def scraper_float_env(name, default, minimum=0.0):
+    try:
+        return max(minimum, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def discovery_limits(max_leads):
+    oversampling = scraper_float_env('SCRAPER_OVERSAMPLING_FACTOR', 1.5, 1.0)
+    query_limit = scraper_int_env('SCRAPER_QUERY_CANDIDATE_LIMIT', 50, 1)
+    return {
+        'max_pool': max(int(max_leads * oversampling), 30),
+        'query_limit': query_limit,
+        'max_scrolls': scraper_int_env('SCRAPER_MAX_SCROLLS_PER_QUERY', 18),
+        'scroll_wait_ms': scraper_int_env('SCRAPER_SCROLL_WAIT_MS', 1500),
+        'max_no_new_scrolls': scraper_int_env('SCRAPER_MAX_NO_NEW_SCROLLS', 3),
+        'low_yield_threshold': scraper_int_env('SCRAPER_LOW_YIELD_QUERY_THRESHOLD', 5),
+        'max_low_yield_queries': scraper_int_env('SCRAPER_MAX_LOW_YIELD_QUERIES', 2),
+        'reuse_detail_page': os.environ.get('SCRAPER_REUSE_DETAIL_PAGE', 'true').lower() == 'true',
+    }
+
+
+def adaptive_query_limit(remaining_leads, configured_limit=50):
+    return min(configured_limit, max(20, remaining_leads * 2))
+
+
+def discovery_should_stop(current_count, target):
+    return current_count >= target
+
+
+def low_yield_should_stop(consecutive_queries, threshold, maximum):
+    return consecutive_queries >= maximum and maximum > 0
+
+
+def preserve_google_instagram(values):
+    return list(dict.fromkeys(values or []))
+
+
+def candidate_identity(item):
+    href = clean_google_redirect_url(item.get('href') or '')
+    if href:
+        return 'url:' + href.split('?')[0].rstrip('/').lower()
+    phone = format_whatsapp(item.get('phone_raw') or item.get('whatsapp'))
+    if phone:
+        return 'phone:' + phone
+    name = str(item.get('title') or item.get('place_name') or '').strip().lower()
+    address = str(item.get('address') or item.get('street') or '').strip().lower()
+    return 'name:' + name + '|' + address if name or address else ''
+
+
+def initialize_discovery_metrics(job_dict, target):
+    if job_dict is None:
+        return
+    job_dict.update({
+        'queries_started': 0, 'queries_completed': 0, 'queries_skipped': 0,
+        'candidate_cards_seen': 0, 'candidates_unique': 0, 'candidates_duplicate': 0,
+        'candidates_prequalified': 0, 'candidates_rejected_pre_detail': 0,
+        'details_avoided': 0, 'qualified_leads': 0, 'target_leads': target,
+        'target_reached': False, 'early_stop_triggered': False,
+        'time_to_first_candidate_ms': None, 'time_to_first_qualified_lead_ms': None,
+        'query_discovery_ms': 0.0, 'detail_processing_ms': 0.0,
+    })
+
 def candidate_card_metadata(element):
     """Read only metadata already rendered in a Maps result card."""
     try:
@@ -418,7 +489,7 @@ def extract_detail_from_place_page(page, fast=False):
 def generate_query_variations(category, city, state):
     cat_clean = category.strip()
     cat_lower = cat_clean.lower()
-    queries = [f"{cat_clean} {city} {state}"]
+    queries = [f"clínica de estética {city} {state}"] if any(k in cat_lower for k in ('estetica', 'estética')) else [f"{cat_clean} {city} {state}"]
 
     if 'dentista' in cat_lower or 'odontolog' in cat_lower:
         queries.extend([
@@ -442,6 +513,15 @@ def generate_query_variations(category, city, state):
             f"Clínica médica Jardim dos Estados {city} {state}",
             f"Consultório médico Centro {city} {state}"
         ])
+    elif any(k in cat_lower for k in ('estetica', 'estética')):
+        queries.extend([
+            f"clínica de estética {city} {state}",
+            f"estética avançada {city} {state}",
+            f"harmonização facial {city} {state}",
+            f"medicina estética {city} {state}",
+            f"estética Centro {city} {state}",
+            f"estética Jardim dos Estados {city} {state}",
+        ])
     else:
         queries.extend([
             f"Clínica de {cat_clean} {city} {state}",
@@ -460,6 +540,190 @@ def generate_query_variations(category, city, state):
             result.append(q)
     return result
 
+
+def _prequalify_card(item, category):
+    if not classify_business_niche({'title': item.get('title'), 'category': category, 'card_text': item.get('card_text')}):
+        return 'category'
+    if item.get('rating') is not None and item['rating'] < 4.5:
+        return 'rating'
+    if item.get('reviews_count') is not None and item['reviews_count'] < 20:
+        return 'reviews'
+    return ''
+
+
+def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict, mode):
+    limits = discovery_limits(max_leads)
+    initialize_discovery_metrics(job_dict, max_leads)
+    results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
+    queries = generate_query_variations(category, city, state)
+    started = time.perf_counter()
+    low_yield = 0
+    detail_page = None
+    query_metrics = []
+
+    def inc(key, amount=1):
+        if job_dict is not None:
+            job_dict[key] = int(job_dict.get(key, 0)) + amount
+
+    def progress(q_idx):
+        if job_dict is not None:
+            job_dict['leads'] = json.loads(json.dumps(results, ensure_ascii=False))
+            job_dict['current_count'] = len(results)
+            job_dict['log'] = (f'Query {q_idx}/{len(queries)} | Candidatos vistos: '
+                               f'{job_dict.get("candidate_cards_seen", 0)} | Pré-qualificados: '
+                               f'{job_dict.get("candidates_prequalified", 0)} | Detalhes abertos: '
+                               f'{job_dict.get("details_opened", 0)} | Leads válidos: {len(results)}/{max_leads}')
+            job_dict['last_activity'] = time.time()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(locale='pt-BR', ignore_https_errors=True)
+            context.on('page', lambda page: page.on('dialog', lambda dialog: dialog.dismiss()))
+            for q_idx, query in enumerate(queries, 1):
+                if len(results) >= max_leads:
+                    break
+                query_started = time.perf_counter()
+                inc('queries_started')
+                page_search = None
+                unique_in_query = 0
+                cards_before = int(job_dict.get('candidate_cards_seen', 0)) if job_dict else 0
+                prequalified_before = int(job_dict.get('candidates_prequalified', 0)) if job_dict else 0
+                leads_before = len(results)
+                try:
+                    page_search = context.new_page()
+                    page_search.set_default_timeout(30000)
+                    page_search.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=45000)
+                    feed = page_search.wait_for_selector('div[role="feed"]', timeout=15000)
+                    if not feed:
+                        continue
+                    limit = adaptive_query_limit(max_leads - len(results), limits['query_limit'])
+                    no_new = 0
+                    previous_cards = 0
+                    query_seen_hrefs = set()
+                    for _ in range(limits['max_scrolls']):
+                        if len(results) >= max_leads or len(seen_candidates) >= limits['max_pool']:
+                            break
+                        links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
+                        new_count = 0
+                        for link in links:
+                            href = link.get_attribute('href') or ''
+                            if href in query_seen_hrefs:
+                                continue
+                            if len(query_seen_hrefs) >= limit:
+                                break
+                            query_seen_hrefs.add(href)
+                            inc('candidate_cards_seen')
+                            card = candidate_card_metadata(link)
+                            card_text = f'{card.get("text", "")} {card.get("aria", "")}'
+                            item = {'href': href, 'title': link.get_attribute('aria-label') or '', 'card_text': card_text, 'rating': parse_rating(card_text), 'reviews_count': parse_reviews(card_text) if re.search(r'avaliações|reviews?', card_text, re.I) else None, 'google_sponsored': bool(re.search(r'patrocinado', card_text, re.I))}
+                            identity = candidate_identity(item)
+                            if not identity or identity in seen_candidates:
+                                inc('candidates_duplicate')
+                                continue
+                            seen_candidates.add(identity)
+                            unique_in_query += 1
+                            new_count += 1
+                            inc('candidates_unique')
+                            if job_dict is not None and job_dict.get('time_to_first_candidate_ms') is None:
+                                job_dict['time_to_first_candidate_ms'] = round((time.perf_counter() - started) * 1000, 2)
+                            reason = _prequalify_card(item, category)
+                            if reason:
+                                inc('rejected_' + reason)
+                                inc('candidates_rejected_pre_detail')
+                                inc('details_avoided')
+                                continue
+                            inc('candidates_prequalified')
+                            if detail_page is None or not limits['reuse_detail_page']:
+                                if detail_page is not None:
+                                    detail_page.close()
+                                detail_page = context.new_page()
+                                detail_page.set_default_timeout(15000)
+                                detail_page.on('dialog', lambda dialog: dialog.dismiss())
+                            inc('details_opened')
+                            detail_started = time.perf_counter()
+                            detail_page.goto(item['href'], wait_until='commit', timeout=10000)
+                            detail = extract_detail_from_place_page(detail_page, fast=True)
+                            if job_dict is not None:
+                                job_dict['detail_processing_ms'] = round(job_dict.get('detail_processing_ms', 0.0) + (time.perf_counter() - detail_started) * 1000, 2)
+                            detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city, 'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
+                            wa = detail.get('whatsapp') or ''
+                            if not wa:
+                                inc('rejected_whatsapp')
+                                inc('without_whatsapp')
+                                continue
+                            place_key = f'{detail.get("place_name", "")}|{detail.get("street") or detail.get("address") or ""}'.lower()
+                            if (place_key != '|' and place_key in seen_places) or wa in seen_phones:
+                                inc('candidates_duplicate')
+                                continue
+                            seen_places.add(place_key)
+                            seen_phones.add(wa)
+                            detail['qualification_status'] = 'qualified'
+                            detail['with_whatsapp'] = True
+                            detail['instagram'] = preserve_google_instagram(detail.get('instagram'))
+                            detail['facebook'], detail['linkedin'], detail['emails'] = [], [], []
+                            results.append(detail)
+                            inc('qualified_leads')
+                            if job_dict is not None and len(results) == 1:
+                                job_dict['time_to_first_qualified_lead_ms'] = round((time.perf_counter() - started) * 1000, 2)
+                            progress(q_idx)
+                            if discovery_should_stop(len(results), max_leads):
+                                if job_dict is not None:
+                                    job_dict['target_reached'] = True
+                                    job_dict['early_stop_triggered'] = True
+                                break
+                        if len(results) >= max_leads or len(links) >= limit:
+                            break
+                        no_new = no_new + 1 if new_count == 0 and len(links) <= previous_cards else 0
+                        previous_cards = len(links)
+                        if no_new >= limits['max_no_new_scrolls']:
+                            break
+                        if links:
+                            links[-1].scroll_into_view_if_needed()
+                        feed.evaluate('el => el.scrollTo(0, el.scrollHeight)')
+                        page_search.mouse.wheel(0, 3500)
+                        try:
+                            page_search.wait_for_function('''([selector, count]) => document.querySelector(selector)?.querySelectorAll('a[href*="/maps/place/"]').length > count''', arg=['div[role="feed"]', len(links)], timeout=limits['scroll_wait_ms'])
+                        except Exception:
+                            no_new += 1
+                    low_yield = low_yield + 1 if unique_in_query < limits['low_yield_threshold'] else 0
+                    if low_yield_should_stop(low_yield, limits['low_yield_threshold'], limits['max_low_yield_queries']):
+                        break
+                except Exception as exc:
+                    print(f"⚠️ Error collecting query '{query}': {exc}", flush=True)
+                finally:
+                    inc('queries_completed')
+                    if job_dict is not None:
+                        job_dict['query_discovery_ms'] = round(job_dict.get('query_discovery_ms', 0.0) + (time.perf_counter() - query_started) * 1000, 2)
+                    query_metrics.append({
+                        'query': query, 'raw_candidates_found': (int(job_dict.get('candidate_cards_seen', 0)) - cards_before) if job_dict else 0,
+                        'new_unique_candidates': unique_in_query,
+                        'prequalified_candidates': (int(job_dict.get('candidates_prequalified', 0)) - prequalified_before) if job_dict else 0,
+                        'qualified_leads_generated': len(results) - leads_before,
+                    })
+                    if page_search:
+                        page_search.close(timeout=2000)
+            if detail_page:
+                detail_page.close()
+            browser.close()
+    finally:
+        if job_dict is not None:
+            elapsed = (time.perf_counter() - started) * 1000
+            job_dict['leads'] = results
+            job_dict['current_count'] = len(results)
+            job_dict['candidates_found'] = len(seen_candidates)
+            job_dict['details_skipped'] = job_dict.get('details_avoided', 0)
+            job_dict['qualified'] = len(results)
+            job_dict['target_reached'] = len(results) >= max_leads
+            job_dict['detail_efficiency_rate'] = round(len(results) / max(job_dict.get('details_opened', 0), 1) * 100, 2)
+            job_dict['details_avoided_rate'] = round(job_dict.get('details_avoided', 0) / max(len(seen_candidates), 1) * 100, 2)
+            job_dict['qualified_leads_per_minute'] = round(len(results) / max(elapsed / 60000, 0.001), 2)
+            job_dict['scrape_total_ms'] = round(elapsed, 2)
+            job_dict['query_metrics'] = query_metrics
+            job_dict['status'] = 'running'
+    return results
+
+
 def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None, mode='full'):
     print(f"DEBUG: Starting scrape_gmaps with max_leads={max_leads}, webhook_url={webhook_url}", flush=True)
     job_started = time.perf_counter()
@@ -469,6 +733,9 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
         job_dict['job_started_at'] = time.time()
         job_dict['mode'] = mode
         job_dict['last_activity'] = time.time()
+
+    if mode == 'fast':
+        return _scrape_gmaps_incremental(job_id_or_callback, category, city, state, max_leads, job_dict, mode)
 
     results = []
     seen_urls = set()
@@ -668,7 +935,7 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     # Step 3: Secondary website/social scraping remains part
                     # of FULL only. FAST returns the same schema with blanks.
                     if mode == 'fast':
-                        detail['instagram'] = []
+                        detail['instagram'] = list(dict.fromkeys(detail.get('instagram') or []))
                         detail['facebook'] = []
                         detail['linkedin'] = []
                         detail['emails'] = []

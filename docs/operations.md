@@ -59,6 +59,34 @@ O FAST marca candidatos sem WhatsApp como `rejected_whatsapp` para a campanha
 atual e não os envia no lote. Isso não apaga dados da base geral. FULL permanece
 sem esse filtro comercial e conserva o fluxo legado.
 
+## Addendum de descoberta incremental
+
+O FAST não forma mais um pool completo antes de processar detalhes. Cada query é
+processada imediatamente e o job expõe progresso no formato `Query n/N`, com
+candidatos vistos, pré-qualificados, detalhes abertos e leads válidos. O early
+stop ocorre no lead solicitado; não há webhook por lead.
+
+Defaults operacionais:
+
+```text
+SCRAPER_OVERSAMPLING_FACTOR=1.5
+SCRAPER_QUERY_CANDIDATE_LIMIT=50
+SCRAPER_MAX_SCROLLS_PER_QUERY=18
+SCRAPER_SCROLL_WAIT_MS=1500
+SCRAPER_MAX_NO_NEW_SCROLLS=3
+SCRAPER_LOW_YIELD_QUERY_THRESHOLD=5
+SCRAPER_MAX_LOW_YIELD_QUERIES=2
+SCRAPER_REUSE_DETAIL_PAGE=true
+```
+
+O job registra `queries_started`, `queries_completed`,
+`candidates_prequalified`, `candidates_rejected_pre_detail`,
+`details_avoided`, `details_avoided_rate`, `time_to_first_candidate_ms`,
+`time_to_first_qualified_lead_ms`, `query_discovery_ms`,
+`detail_processing_ms` e `qualified_leads_per_minute`. Se a meta não for
+atingida, o job termina normalmente com `target_reached=false` e a quantidade
+encontrada, sem looping indefinido.
+
 Antes de promover uma alteração posterior, conferir no job as métricas de
 `details_skipped`, `details_opened`, `qualified`, `web_results_found` e
 `qualified_leads_per_minute`. Benchmark real deve usar endpoint autorizado e
