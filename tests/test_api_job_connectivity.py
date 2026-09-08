@@ -47,7 +47,10 @@ def test_health_is_process_only_and_public(monkeypatch):
     try:
         status, body = http_json(f"{base}/api/health")
         assert status == 200
-        assert body == {"ok": True, "service": "webscraping-toolkit"}
+        assert body["ok"] is True
+        assert body["service"] == "scraper"
+        assert body["port"] == 8990
+        assert isinstance(body["pid"], int)
     finally:
         server.shutdown()
         server.server_close()

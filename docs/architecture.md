@@ -19,6 +19,8 @@ Stark Scraper Studio (:8990)
     +--> estado temporário dos jobs
     |
     +--> webhook/MCP externo (opcional)
+    |
+    +--> Supabase REST (opcional, somente quando configurado)
 ```
 
 ## Modos compatíveis

@@ -31,6 +31,43 @@ TARGET_NICHE_NEGATIVE_TERMS = (
 def only_digits(s):
     return re.sub(r'\D+', '', str(s or ''))
 
+
+def _emit_qualified_lead(job_dict, detail):
+    callback = getattr(job_dict, '_on_qualified_lead', None) if job_dict is not None else None
+    if callable(callback):
+        try:
+            callback(dict(detail))
+        except Exception as exc:
+            if job_dict is not None:
+                job_dict['supabase_callback_error'] = str(exc)
+
+
+def _set_job_phase(job_dict, phase, log=None):
+    if job_dict is None:
+        return
+    now = time.time()
+    job_dict['last_phase'] = phase
+    job_dict['worker_heartbeat_at'] = now
+    job_dict['last_activity'] = now
+    if log:
+        job_dict['log'] = log
+
+
+def _promote_social_website(detail):
+    url = str(detail.get('website') or '').strip()
+    if not url:
+        return
+    lower = url.lower()
+    if 'instagram.com' in lower:
+        detail['instagram'] = list(dict.fromkeys((detail.get('instagram') or []) + [url]))
+        detail['website'] = ''
+    elif 'facebook.com' in lower:
+        detail['facebook'] = list(dict.fromkeys((detail.get('facebook') or []) + [url]))
+        detail['website'] = ''
+    elif 'linkedin.com' in lower:
+        detail['linkedin'] = list(dict.fromkeys((detail.get('linkedin') or []) + [url]))
+        detail['website'] = ''
+
 def format_whatsapp(phone):
     d = only_digits(phone)
     if not d:
@@ -124,8 +161,11 @@ def classify_business_niche(candidate):
         return False
     if any(term in text for term in TARGET_NICHE_POSITIVE_TERMS):
         return True
-    # Generic "estética" is accepted until details provide a stronger signal.
-    return 'estetica' in text or 'estética' in text
+    # Generic clinical searches are accepted until profile details provide a stronger signal.
+    return any(term in text for term in (
+        'estetica', 'estética', 'clinica', 'clínica', 'consultorio', 'consultório',
+        'centro medico', 'centro médico', 'especialista',
+    ))
 
 def parse_rating(value):
     match = re.search(r'\b([0-5](?:[.,]\d)?)\b', str(value or ''))
@@ -802,6 +842,7 @@ def extract_detail_from_place_page(page, fast=False, item=None):
     data['instagram_source'] = 'google_web_results' if data.get('instagram') else ''
     data['cnpj'] = data.get('google_result_cnpj') or data.get('cnpj') or ''
     data['cnpj_source'] = 'google_web_results' if data.get('cnpj') else ''
+    _promote_social_website(data)
     return data
 
 def generate_query_variations(category, city, state):
@@ -895,6 +936,10 @@ def next_detail_batch_size(conversion_rate, configured=6, dynamic=True, maximum=
 
 def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode):
     limits = discovery_limits(max_leads)
+    navigation_timeout_ms = max(5000, int(os.environ.get('SCRAPER_NAVIGATION_TIMEOUT_MS', '20000')))
+    feed_timeout_ms = max(3000, int(os.environ.get('SCRAPER_FEED_TIMEOUT_MS', '8000')))
+    query_budget_seconds = max(15.0, float(os.environ.get('SCRAPER_QUERY_BUDGET_SECONDS', '75')))
+    runtime_budget_seconds = max(query_budget_seconds, float(os.environ.get('SCRAPER_RUNTIME_BUDGET_SECONDS', '900')))
     initialize_discovery_metrics(job_dict, max_leads)
     results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
     detail_samples, query_metrics = [], []
@@ -929,6 +974,7 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
         job_dict['log'] = (f'FAST V3 | Query {q_idx}/{len(queries)} | candidatos={local["candidate_cards_seen"]} '
                            f'| buffer | detalhes={local["details_opened"]} | leads={len(results)}/{max_leads}')
         job_dict['last_activity'] = time.time()
+        job_dict['worker_heartbeat_at'] = job_dict['last_activity']
         local['last_sync'], local['last_synced_leads'] = now, len(results)
         local['progress_sync_count'] += 1
         local['manager_sync_count'] += 1
@@ -996,6 +1042,7 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                     'instagram_source': '', 'cnpj_source': ''}.items()})
                 detail['cnpj'] = detail.get('google_result_cnpj') or detail.get('cnpj') or ''
                 detail['cnpj_source'] = 'google_web_results' if detail['cnpj'] else ''
+                _promote_social_website(detail)
                 local['web_results_found'] += bool(optional.get('web_results'))
                 local['web_results_instagram_found'] += bool(optional.get('instagram'))
                 local['google_web_results_found'] = local.get('google_web_results_found', 0) + bool(optional.get('web_results'))
@@ -1010,9 +1057,13 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                     continue
                 seen_places.add(place_key); seen_phones.add(wa)
                 detail.update({'qualification_status': 'qualified', 'with_whatsapp': True,
-                    'instagram': preserve_google_instagram(detail.get('instagram')), 'facebook': [],
-                    'linkedin': [], 'emails': []})
-                results.append(detail); local['qualified_leads'] += 1
+                    'instagram': preserve_google_instagram(detail.get('instagram')),
+                    'facebook': list(dict.fromkeys(detail.get('facebook') or [])),
+                    'linkedin': list(dict.fromkeys(detail.get('linkedin') or [])),
+                    'emails': list(dict.fromkeys(detail.get('emails') or []))})
+                results.append(detail)
+                _emit_qualified_lead(job_dict, detail)
+                local['qualified_leads'] += 1
                 timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
                 detail_samples.append(timings)
                 if len(results) == 1 and job_dict is not None:
@@ -1026,20 +1077,36 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
         sync_job_metrics(q_idx, force=True)
 
     try:
+        _set_job_phase(job_dict, 'playwright_starting', 'Iniciando Playwright...')
         with sync_playwright() as p:
+            _set_job_phase(job_dict, 'playwright_started')
+            _set_job_phase(job_dict, 'chromium_launching', 'Iniciando Chromium...')
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            _set_job_phase(job_dict, 'chromium_launched')
+            _set_job_phase(job_dict, 'context_creating')
             context = browser.new_context(locale='pt-BR', ignore_https_errors=True)
+            _set_job_phase(job_dict, 'context_created')
             if os.environ.get('SCRAPER_BLOCK_HEAVY_RESOURCES', 'false').lower() == 'true':
                 context.route('**/*', route_fast_resources)
+            _set_job_phase(job_dict, 'search_page_creating')
             detail_page = context.new_page(); detail_page.set_default_timeout(15000)
             search_page = context.new_page(); search_page.set_default_timeout(30000)
+            _set_job_phase(job_dict, 'search_page_created')
+            _set_job_phase(job_dict, 'query_loop_entered')
             current_batch_size, batch_number = limits['warmup_batch_size'], 0
             for q_idx, query in enumerate(queries, 1):
                 if len(results) >= max_leads: break
+                if time.perf_counter() - started >= runtime_budget_seconds:
+                    if job_dict is not None: job_dict['stop_reason'] = 'runtime_budget'
+                    break
+                _set_job_phase(job_dict, 'query_started', f'Query {q_idx}/{len(queries)}: {query}')
                 local['queries_started'] += 1; query_started = time.perf_counter(); unique_in_query = 0; qualified_before = len(results)
                 try:
-                    search_page.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=45000)
-                    feed = search_page.wait_for_selector('div[role="feed"]', timeout=15000)
+                    search_page.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=navigation_timeout_ms)
+                    if time.perf_counter() - query_started >= query_budget_seconds:
+                        if job_dict is not None: job_dict['stop_reason'] = 'query_timeout'
+                        continue
+                    feed = search_page.wait_for_selector('div[role="feed"]', timeout=feed_timeout_ms)
                     if not feed: continue
                     limit, no_new, previous_cards, query_seen_hrefs = adaptive_query_limit(max_leads - len(results), limits['query_limit']), 0, 0, set()
                     candidate_buffer = []
@@ -1085,15 +1152,17 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                     conversion = (len(results) - qualified_before) / max(local['details_opened'], 1)
                     if limits['dynamic_batch_size'] and batch_number:
                         current_batch_size = next_detail_batch_size(local.get('last_conversion', conversion), limits['detail_batch_size'], True, limits['max_detail_batch_size'])
-                    local['queries_completed'] += 1
                     query_metrics.append({'query': query, 'new_unique_candidates': unique_in_query, 'qualified_leads_generated': len(results) - qualified_before})
                     sync_job_metrics(q_idx, force=True)
                     if unique_in_query < limits['low_yield_threshold'] or len(results) == qualified_before: local.setdefault('low_yield', 0); local['low_yield'] += 1
                     else: local['low_yield'] = 0
                     if local.get('low_yield', 0) >= limits['max_low_yield_queries']: break
                 except Exception as exc:
+                    if job_dict is not None:
+                        job_dict['last_activity'] = time.time()
                     print(f"⚠️ Error collecting query '{query}': {exc}", flush=True)
                 finally:
+                    local['queries_completed'] += 1
                     if job_dict is not None: job_dict['query_discovery_ms'] = round(job_dict.get('query_discovery_ms', 0.0) + (time.perf_counter() - query_started) * 1000, 2)
             detail_page.close(); search_page.close(); browser.close()
     finally:
@@ -1117,6 +1186,8 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                 'performance': {'detail': detail_summary, 'candidate_snapshot': job_dict['candidate_snapshot_ms'],
                                 'basic_detail_snapshot': summarize_samples(local['basic_detail_snapshot_ms'])}})
             job_dict.pop('detail_performance_samples', None); sync_job_metrics(len(queries), force=True)
+            job_dict['stop_reason'] = 'target_reached' if len(results) >= max_leads else (job_dict.get('stop_reason') or 'query_exhausted')
+            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results)}
             job_dict['status'] = 'running'
     return results
 
@@ -1168,7 +1239,13 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
             for q_idx, query in enumerate(queries, 1):
                 if len(results) >= max_leads:
                     break
+                if time.perf_counter() - started >= runtime_budget_seconds:
+                    if job_dict is not None:
+                        job_dict['stop_reason'] = 'runtime_budget'
+                    break
                 query_started = time.perf_counter()
+                if job_dict is not None:
+                    job_dict['last_activity'] = time.time()
                 inc('queries_started')
                 page_search = None
                 unique_in_query = 0
@@ -1182,8 +1259,12 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                         search_page = context.new_page()
                     page_search = search_page
                     page_search.set_default_timeout(30000)
-                    page_search.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=45000)
-                    feed = page_search.wait_for_selector('div[role="feed"]', timeout=15000)
+                    page_search.goto(f'https://www.google.com.br/maps/search/{urllib.parse.quote(query)}', wait_until='domcontentloaded', timeout=navigation_timeout_ms)
+                    if time.perf_counter() - query_started >= query_budget_seconds:
+                        if job_dict is not None:
+                            job_dict['stop_reason'] = 'query_timeout'
+                        continue
+                    feed = page_search.wait_for_selector('div[role="feed"]', timeout=feed_timeout_ms)
                     if not feed:
                         continue
                     limit = adaptive_query_limit(max_leads - len(results), limits['query_limit'])
@@ -1246,6 +1327,16 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                                 ready_wait_ms=limits['detail_ready_wait_ms'],
                                 timings=timings,
                             )
+                            if detail is None:
+                                detail = _extract_place_detail(
+                                    detail_page, fast=True, item=item,
+                                    include_optional=False,
+                                    ready_wait_ms=limits['detail_ready_wait_ms'],
+                                    timings=timings,
+                                )
+                            if detail is None:
+                                local['detail_timeouts'] = local.get('detail_timeouts', 0) + 1
+                                continue
                             detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city, 'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
                             if not detail.get('reviews_count') and item.get('reviews_count') is not None:
                                 detail['reviews_count'] = item['reviews_count']
@@ -1293,6 +1384,7 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             }.items()})
                             detail['cnpj'] = detail.get('google_result_cnpj') or detail.get('cnpj') or ''
                             detail['cnpj_source'] = 'google_web_results' if detail['cnpj'] else ''
+                            _promote_social_website(detail)
                             if optional.get('web_results'):
                                 inc('web_results_found')
                             if optional.get('instagram'):
@@ -1312,8 +1404,11 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             detail['qualification_status'] = 'qualified'
                             detail['with_whatsapp'] = True
                             detail['instagram'] = preserve_google_instagram(detail.get('instagram'))
-                            detail['facebook'], detail['linkedin'], detail['emails'] = [], [], []
+                            detail['facebook'] = list(dict.fromkeys(detail.get('facebook') or []))
+                            detail['linkedin'] = list(dict.fromkeys(detail.get('linkedin') or []))
+                            detail['emails'] = list(dict.fromkeys(detail.get('emails') or []))
                             results.append(detail)
+                            _emit_qualified_lead(job_dict, detail)
                             inc('qualified_leads')
                             timings['total_ms'] = (time.perf_counter() - detail_started) * 1000
                             record_detail(timings)
@@ -1404,11 +1499,14 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
             job_dict.pop('detail_performance_samples', None)
             job_dict['scrape_total_ms'] = round(elapsed, 2)
             job_dict['query_metrics'] = query_metrics
+            job_dict['stop_reason'] = 'target_reached' if len(results) >= max_leads else (job_dict.get('stop_reason') or 'query_exhausted')
+            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results)}
             job_dict['status'] = 'running'
     return results
 
 
 def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None, mode='full'):
+    _set_job_phase(job_dict, 'scraper_entered', 'Scraper iniciado.')
     print(f"DEBUG: Starting scrape_gmaps with max_leads={max_leads}, webhook_url={webhook_url}", flush=True)
     job_started = time.perf_counter()
     if job_dict is not None:
@@ -1643,6 +1741,7 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
                     detail['google_maps_url'] = m_url.group(0) if m_url else raw_gmaps_url
 
                     results.append(detail)
+                    _emit_qualified_lead(job_dict, detail)
 
                     if job_dict:
                         if len(results) == 1 and job_dict.get('job_started_at'):

@@ -3,7 +3,7 @@ RUN apt-get update && apt-get install -y tini && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir playwright
 RUN playwright install chromium
 WORKDIR /app
-COPY src/gmaps_playwright_scraper.py src/gmaps_web_ui.py src/supabase_writer.py ./
+COPY src/gmaps_playwright_scraper.py src/gmaps_web_ui.py src/supabase_writer.py src/supabase_persistence.py ./
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8990
 ENTRYPOINT ["/usr/bin/tini", "--"]

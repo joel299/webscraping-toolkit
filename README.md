@@ -89,6 +89,8 @@ com o fluxo legado.
 - `BRASILAPI_CNPJ_URL`: endpoint da API de CNPJ, quando utilizado.
 - `BRASILAPI_MIN_INTERVAL_SECONDS`: intervalo mínimo entre consultas de CNPJ.
 - `SCRAPER_API_BASE_URL`: URL da API do Scraper Studio para o monitor de jobs.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` e `SUPABASE_LEADS_TABLE`: persistência
+  opcional via REST. Sem URL/chave, fluxo existente não faz chamadas externas.
 
 ## Envio de leads
 

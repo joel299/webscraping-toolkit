@@ -13,10 +13,10 @@ from threading import Thread
 
 try:
     from . import gmaps_playwright_scraper
-    from .supabase_writer import persist_leads_batch
+    from . import supabase_persistence
 except ImportError:
     import gmaps_playwright_scraper
-    from supabase_writer import persist_leads_batch
+    import supabase_persistence
 
 import multiprocessing
 
@@ -869,6 +869,15 @@ class JobProxy(dict):
         super().__setitem__(key, value)
         self.sync()
 
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self.sync()
+
+    def pop(self, *args):
+        value = super().pop(*args)
+        self.sync()
+        return value
+
 def run_enrich_inline(job_proxy, webhook_url=None):
     leads = list(job_proxy.get('leads') or [])
     if not leads:
@@ -953,6 +962,27 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
     print('[WORKER] job started', flush=True)
     initial_job = dict(jobs_dict.get(job_id) or {})
     job_proxy = JobProxy(job_id, jobs_dict, initial_job)
+    incremental_enabled = bool(getattr(supabase_persistence, 'supabase_enabled', lambda: False)())
+    job_proxy['supabase_incremental_enabled'] = incremental_enabled
+
+    def persist_incremental(lead):
+        if not incremental_enabled:
+            return
+        try:
+            result = supabase_persistence.persist_leads(
+                [lead], job_id=job_id, category=category, city=city, state=state,
+            )
+            job_proxy['supabase_last_write'] = result
+            job_proxy['supabase_incremental_count'] = int(job_proxy.get('supabase_incremental_count', 0)) + int(result.get('persisted', 0))
+            job_proxy['supabase_failed'] = int(job_proxy.get('supabase_failed', 0)) + (0 if result.get('verified') else 1)
+            job_proxy['last_activity'] = time.time()
+        except Exception as exc:
+            job_proxy['supabase_last_write'] = {'enabled': True, 'persisted': 0, 'verified': False, 'error': str(exc)}
+            job_proxy['supabase_failed'] = int(job_proxy.get('supabase_failed', 0)) + 1
+
+    job_proxy._on_qualified_lead = persist_incremental
+    job_proxy['last_phase'] = 'worker_started'
+    job_proxy['worker_heartbeat_at'] = time.time()
     try:
         leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy, mode=mode)
         job_proxy['leads'] = leads or job_proxy.get('leads') or []
@@ -969,9 +999,29 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
             job_proxy['supabase_error'] = str(exc)
         job_proxy['status'] = 'completed'
         job_proxy['phase'] = 'scrape'
+        job_proxy['last_phase'] = 'job_completed'
+        job_proxy['worker_heartbeat_at'] = time.time()
         job_proxy['finished_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
         job_proxy['log'] = f'Coleta concluída: {len(job_proxy["leads"])} leads.'
         print('[WORKER] job completed', flush=True)
+        job_proxy.sync()
+        # Incremental persistence is performed by the qualified-lead callback.
+        # Keep a final summary without replaying the same rows.
+        persistence = {
+            'enabled': incremental_enabled,
+            'persisted': int(job_proxy.get('supabase_incremental_count', 0)),
+            'verified': bool(incremental_enabled and not job_proxy.get('supabase_failed', 0)),
+            'incremental': True,
+        }
+        if not incremental_enabled:
+            try:
+                persistence = supabase_persistence.persist_leads(
+                    job_proxy['leads'], job_id=job_id, category=category,
+                    city=city, state=state,
+                )
+            except Exception as exc:
+                persistence = {'enabled': True, 'persisted': 0, 'verified': False, 'error': str(exc)}
+        job_proxy['supabase'] = persistence
         job_proxy.sync()
         if mode == 'fast':
             final_payload = make_payload(job_proxy)
@@ -996,6 +1046,12 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
     except Exception as exc:
         print(f'[WORKER] job error type={type(exc).__name__}', flush=True)
         job_proxy['status'] = 'error'
+        phase = job_proxy.get('last_phase') or 'worker_exception'
+        job_proxy['stop_reason'] = 'browser_startup_failed' if phase in {
+            'worker_started', 'scraper_entered', 'playwright_starting', 'playwright_started',
+            'chromium_launching', 'context_creating', 'search_page_creating',
+        } else 'worker_exception'
+        job_proxy['stop_details'] = {'phase': phase, 'captured': len(job_proxy.get('leads') or [])}
         job_proxy['error'] = str(exc)
         job_proxy['log'] = 'Erro na coleta: ' + str(exc)
         job_proxy.sync()
@@ -1099,7 +1155,7 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             self.wfile.write(out.getvalue().encode('utf-8'))
             return
         if parsed.path == '/api/health':
-            self.send_json({'ok': True, 'service': 'webscraping-toolkit'})
+            self.send_json({'ok': True, 'service': 'scraper', 'port': 8990, 'pid': os.getpid()})
             return
         if parsed.path.startswith('/api/job/'):
             job_id = parsed.path.split('/')[-1]
@@ -1108,11 +1164,10 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             if not job:
                 self.send_json({'error': 'job not found'}, 404)
                 return
-            print(f'[API] job poll id={job_id}', flush=True)
-            if job.get('status') == 'running' and time.time() - job.get('last_activity', time.time()) > 180:
-                job['status'] = 'error'
-                job['error'] = 'Timeout: extração inativa por mais de 3 minutos.'
-                job['log'] = 'Erro: extração inativa por mais de 3 minutos. Job interrompido.'
+            if job.get('status') == 'running':
+                stall_seconds = round(time.time() - job.get('last_activity', time.time()), 1)
+                job['worker_stalled'] = stall_seconds > 180
+                job['stall_seconds'] = stall_seconds
             job['payload'] = make_payload(job)
             self.send_json(job)
             return
