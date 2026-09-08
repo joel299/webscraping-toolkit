@@ -13,8 +13,10 @@ from threading import Thread
 
 try:
     from . import gmaps_playwright_scraper
+    from .supabase_writer import persist_leads_batch
 except ImportError:
     import gmaps_playwright_scraper
+    from supabase_writer import persist_leads_batch
 
 import multiprocessing
 
@@ -941,6 +943,16 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
         leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy, mode=mode)
         job_proxy['leads'] = leads or job_proxy.get('leads') or []
         job_proxy['current_count'] = len(job_proxy['leads'])
+        try:
+            persistence = persist_leads_batch(
+                job_proxy['leads'], job_proxy.get('category', ''),
+                job_proxy.get('city', ''), job_proxy.get('state', ''),
+            )
+            job_proxy.update({key: value for key, value in persistence.items() if key != 'results'})
+            job_proxy['supabase_persistence'] = persistence
+        except Exception as exc:
+            job_proxy['supabase_failed'] = int(job_proxy.get('supabase_failed', 0)) + len(job_proxy['leads'])
+            job_proxy['supabase_error'] = str(exc)
         job_proxy['status'] = 'completed'
         job_proxy['phase'] = 'scrape'
         job_proxy['finished_at'] = time.strftime('%Y-%m-%d %H:%M:%S')

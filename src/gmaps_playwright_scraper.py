@@ -7,9 +7,13 @@ import sys
 import time
 import urllib.request
 import urllib.parse
+import hashlib
+import concurrent.futures
 from playwright.sync_api import sync_playwright
 
 TARGET_NICHE_POSITIVE_TERMS = (
+    'clinica', 'clínica', 'consultorio', 'consultório', 'centro medico', 'centro médico',
+    'medico', 'médico', 'medicina', 'odontologia', 'dentista', 'hospital',
     'clinica de estetica', 'clínica de estética', 'clinica estetica', 'clínica estética',
     'estetica avancada', 'estética avançada', 'medicina estetica', 'medicina estética',
     'dermatologia estetica', 'dermatologia estética', 'clinica dermatologica', 'clínica dermatológica',
@@ -56,7 +60,7 @@ def parse_google_web_result_payload(payload):
     text = str(payload.get('text') or '')
     links = payload.get('links') or []
     website = ''
-    instagram = []
+    socials = {'instagram': [], 'facebook': [], 'linkedin': []}
     cnpj = ''
     web_results = []
     for raw_link in links:
@@ -76,7 +80,11 @@ def parse_google_web_result_payload(payload):
             continue
         if 'instagram.com' in lower:
             result_type = 'instagram'
-        elif any(domain_name in lower for domain_name in ('facebook.com', 'linkedin.com', 'youtube.com', 'tiktok.com')):
+        elif 'facebook.com' in lower or 'fb.com' in lower:
+            result_type = 'facebook'
+        elif 'linkedin.com' in lower:
+            result_type = 'linkedin'
+        elif any(domain_name in lower for domain_name in ('youtube.com', 'tiktok.com')):
             result_type = 'social'
         elif any(domain_name in lower for domain_name in ('doctoralia.com', 'guiasaude', 'telelistas', 'yelp.com')):
             result_type = 'directory'
@@ -85,21 +93,29 @@ def parse_google_web_result_payload(payload):
         else:
             result_type = 'website'
         web_results.append({'type': result_type, 'title': title, 'url': url, 'domain': domain, 'snippet': snippet})
-        if 'instagram.com' in lower:
-            if url not in instagram:
-                instagram.append(url)
-        elif not website and urllib.parse.urlparse(url).scheme in ('http', 'https'):
+        social_found = False
+        for social in socials:
+            if social + '.com' in lower or (social == 'facebook' and 'fb.com' in lower):
+                social_found = True
+                if url not in socials[social]:
+                    socials[social].append(url)
+        if not social_found and not website and urllib.parse.urlparse(url).scheme in ('http', 'https'):
             if not any(domain in lower for domain in (
                 'google.com', 'facebook.com', 'linkedin.com', 'youtube.com',
                 'tiktok.com', 'twitter.com', 'x.com', 'instagram.com',
             )):
                 website = url
-    match = re.search(r'\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b', text)
+    snippets = ' '.join(str(x.get('snippet') or '') for x in links if isinstance(x, dict))
+    match = re.search(r'\b(?:CNPJ\s*[:\-]?\s*)?\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b', text + ' ' + snippets, re.I)
     if match:
         digits = only_digits(match.group(0))
         if len(digits) == 14:
             cnpj = f'{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}'
-    return {'website': website, 'instagram': instagram, 'cnpj': cnpj, 'web_results': web_results}
+    return {
+        'website': website, 'instagram': socials['instagram'],
+        'facebook': socials['facebook'], 'linkedin': socials['linkedin'],
+        'cnpj': cnpj, 'web_results': web_results,
+    }
 
 def classify_business_niche(candidate):
     """Classify a Maps candidate using centralized positive/negative niche signals."""
@@ -123,6 +139,33 @@ def parse_reviews(value):
     match = matches[-1]
     number = float(match.group(1).replace(',', '.'))
     return int(number * 1000) if match.group(2) else int(number)
+
+
+def stable_source_key(lead):
+    """Stable id for idempotent persistence without touching commercial fields."""
+    url = clean_google_redirect_url(lead.get('google_maps_url') or '')
+    phone = format_whatsapp(lead.get('whatsapp') or lead.get('phone_raw'))
+    name = re.sub(r'\s+', ' ', str(lead.get('place_name') or '').strip().lower())
+    address = re.sub(r'\s+', ' ', str(lead.get('address') or '').strip().lower())
+    seed = url.split('?')[0].rstrip('/').lower() if url else phone or f'{name}|{address}'
+    return 'gmaps:' + hashlib.sha256(seed.encode('utf-8')).hexdigest()[:40]
+
+
+def validate_detail_identity(page, candidate):
+    """Prevent stale page data from being assigned to the next candidate."""
+    expected_url = clean_google_redirect_url(candidate.get('href') or '')
+    current_url = clean_google_redirect_url(getattr(page, 'url', '') or '')
+    if expected_url and current_url and expected_url.split('?')[0].rstrip('/') != current_url.split('?')[0].rstrip('/'):
+        return False
+    expected = normalize_place_name(candidate.get('title'))
+    if not expected:
+        return True
+    try:
+        heading = page.query_selector('h1.DUwDvf, h1.fontTitleLarge, div[role="main"] h1, h1')
+        actual = normalize_place_name(heading.inner_text() if heading else '')
+        return not actual or actual.casefold() == expected.casefold() or expected.casefold() in actual.casefold() or actual.casefold() in expected.casefold()
+    except Exception:
+        return False
 
 
 def scraper_int_env(name, default, minimum=0):
@@ -257,6 +300,13 @@ def initialize_discovery_metrics(job_dict, target):
         'web_results_attempted': 0, 'web_results_skipped': 0,
         'web_results_found': 0, 'web_results_instagram_found': 0,
         'rejected_before_web_results': 0,
+        'discovery_scrolls': 0, 'dynamic_cards_loaded': 0,
+        'unique_candidates': 0, 'candidate_duplicates': 0,
+        'detail_queue_size': 0, 'detail_workers': scraper_int_env('SCRAPER_DETAIL_CONCURRENCY', 3, 1),
+        'detail_completed': 0, 'detail_failed': 0,
+        'supabase_inserted': 0, 'supabase_updated': 0, 'supabase_failed': 0, 'supabase_batches': 0,
+        'google_web_results_found': 0, 'instagram_found': 0, 'facebook_found': 0,
+        'linkedin_found': 0, 'cnpj_found': 0,
         'detail_performance_samples': [],
     })
 
@@ -328,9 +378,9 @@ def extract_google_web_results(page, max_scrolls=None, scroll_delay_ms=None):
             const heading = headings.find(el => /resultados da web/i.test(el.innerText || ''));
             if (!heading) return {text: '', links: []};
             let root = heading;
-            for (let i = 0; i < 5 && root.parentElement; i++) {
+            for (let i = 0; i < 8 && root.parentElement; i++) {
                 root = root.parentElement;
-                if (root.querySelectorAll('a[href]').length >= 1) break;
+                if (root.querySelectorAll('a[href]').length >= 1 && (root.scrollHeight > root.clientHeight || i >= 3)) break;
             }
             return {
                 text: root.innerText || '',
@@ -344,7 +394,16 @@ def extract_google_web_results(page, max_scrolls=None, scroll_delay_ms=None):
         for _ in range(max_scrolls):
             if result['web_results']:
                 break
-            page.mouse.wheel(0, 500)
+            page.evaluate('''() => {
+                const heading = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')].find(el => /resultados da web/i.test(el.innerText || ''));
+                if (!heading) return false;
+                let root = heading;
+                for (let i = 0; i < 8 && root.parentElement; i++) {
+                    root = root.parentElement;
+                    if (root.scrollHeight > root.clientHeight) { root.scrollTop = root.scrollHeight; return true; }
+                }
+                window.scrollBy(0, 500); return true;
+            }''')
             if scroll_delay_ms:
                 time.sleep(scroll_delay_ms / 1000)
             payload = read_block()
@@ -528,12 +587,20 @@ def _extract_place_detail(page, fast=False, item=None, include_optional=True, re
 
     reviews_btn = page.query_selector('button[jsaction*="review"], button[aria-label*="avaliações"]')
     if reviews_btn:
-        txt = reviews_btn.inner_text().strip()
-        m = re.search(r'\((\d+)\)', txt)
-        if m:
-            data['reviews_count'] = m.group(1)
+        txt = ' '.join(filter(None, [
+            reviews_btn.inner_text().strip(),
+            reviews_btn.get_attribute('aria-label') or '',
+        ]))
+        parsed_reviews = parse_reviews(txt)
+        if parsed_reviews is not None:
+            data['reviews_count'] = parsed_reviews
     if not data.get('reviews_count'):
-        data['reviews_count'] = ''
+        try:
+            body_text = page.inner_text('body')
+            review_match = re.search(r'(\d+(?:[.,]\d+)?\s*(?:mil|k)?\s*(?:avaliações|reviews?))', body_text, re.I)
+            data['reviews_count'] = parse_reviews(review_match.group(1)) if review_match else ''
+        except Exception:
+            data['reviews_count'] = ''
 
     # 3. Category
     cat_btn = page.query_selector('button[jsaction*="category"]')
@@ -639,13 +706,13 @@ def _detail_from_snapshot(page, item=None, ready_wait_ms=1200, timings=None):
     data = {
         'place_name': normalize_place_name(raw.get('place_name')),
         'total_score': (raw.get('total_score') or '').replace(',', '.'),
-        'reviews_count': raw.get('reviews_count') or '',
+        'reviews_count': parse_reviews(raw.get('reviews_count')) if raw.get('reviews_count') else '',
         'category': raw.get('category') or '',
         'address': raw.get('address') or '',
         'phone_raw': raw.get('phone_raw') or '',
         'website': clean_google_redirect_url(raw.get('website') or ''),
         'plus_code': raw.get('plus_code') or '',
-        'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+        'instagram': [], 'facebook': [], 'linkedin': [], 'google_result_cnpj': '', 'web_results': [],
         'instagram_source': '', 'cnpj_source': '',
         'google_maps_url': page.url,
     }
@@ -730,9 +797,10 @@ def extract_detail_from_place_page(page, fast=False, item=None):
     if not data.get('website'):
         data['website'] = optional.get('website', '')
     data.update({key: optional.get(key, default) for key, default in {
-        'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+        'instagram': [], 'facebook': [], 'linkedin': [], 'google_result_cnpj': '', 'web_results': [],
     }.items()})
     data['instagram_source'] = 'google_web_results' if data.get('instagram') else ''
+    data['cnpj'] = data.get('google_result_cnpj') or data.get('cnpj') or ''
     data['cnpj_source'] = 'google_web_results' if data.get('cnpj') else ''
     return data
 
@@ -837,7 +905,9 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
         'details_opened', 'qualified_leads', 'without_whatsapp', 'rejected_whatsapp',
         'rejected_before_web_results', 'web_results_attempted', 'web_results_skipped',
         'web_results_found', 'web_results_instagram_found', 'candidate_snapshot_count',
-        'basic_detail_snapshot_fallbacks', 'candidate_batches_processed', 'progress_sync_count')}
+        'basic_detail_snapshot_fallbacks', 'candidate_batches_processed', 'progress_sync_count',
+        'discovery_scrolls', 'dynamic_cards_loaded', 'detail_failed', 'google_web_results_found',
+        'instagram_found', 'facebook_found', 'linkedin_found', 'cnpj_found')}
     local.update({'candidate_snapshot_ms': [], 'basic_detail_snapshot_ms': [], 'batch_sizes': [],
                   'candidate_priority_used': 0, 'manager_sync_count': 0, 'last_sync': 0.0,
                   'last_synced_leads': 0})
@@ -882,6 +952,9 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                 goto_started = time.perf_counter()
                 detail_page.goto(item['href'], wait_until='commit', timeout=10000)
                 timings['goto_ms'] = (time.perf_counter() - goto_started) * 1000
+                if not validate_detail_identity(detail_page, item):
+                    local['detail_failed'] = local.get('detail_failed', 0) + 1
+                    continue
                 detail = extract_basic_place_detail(detail_page, fast=True, item=item,
                     ready_wait_ms=limits['detail_ready_wait_ms'], timings=timings)
                 if detail is None:
@@ -890,6 +963,10 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                         include_optional=False, ready_wait_ms=limits['detail_ready_wait_ms'], timings=timings)
                 detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city,
                     'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
+                if not detail.get('reviews_count') and item.get('reviews_count') is not None:
+                    detail['reviews_count'] = item['reviews_count']
+                if not detail.get('total_score') and item.get('rating') is not None:
+                    detail['total_score'] = str(item['rating'])
                 qualification_started = time.perf_counter()
                 if not detail.get('whatsapp'):
                     try:
@@ -915,10 +992,17 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                 optional = extract_optional_google_web_results(detail_page, fast=True, timings=timings)
                 detail['website'] = detail.get('website') or optional.get('website', '')
                 detail.update({key: optional.get(key, default) for key, default in {
-                    'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+                    'instagram': [], 'facebook': [], 'linkedin': [], 'google_result_cnpj': '', 'web_results': [],
                     'instagram_source': '', 'cnpj_source': ''}.items()})
+                detail['cnpj'] = detail.get('google_result_cnpj') or detail.get('cnpj') or ''
+                detail['cnpj_source'] = 'google_web_results' if detail['cnpj'] else ''
                 local['web_results_found'] += bool(optional.get('web_results'))
                 local['web_results_instagram_found'] += bool(optional.get('instagram'))
+                local['google_web_results_found'] = local.get('google_web_results_found', 0) + bool(optional.get('web_results'))
+                local['instagram_found'] = local.get('instagram_found', 0) + bool(optional.get('instagram'))
+                local['facebook_found'] = local.get('facebook_found', 0) + bool(optional.get('facebook'))
+                local['linkedin_found'] = local.get('linkedin_found', 0) + bool(optional.get('linkedin'))
+                local['cnpj_found'] = local.get('cnpj_found', 0) + bool(detail.get('cnpj'))
                 wa = detail.get('whatsapp') or ''
                 place_key = f'{detail.get("place_name", "")}|{detail.get("street") or detail.get("address") or ""}'.lower()
                 if (place_key != '|' and place_key in seen_places) or wa in seen_phones:
@@ -960,6 +1044,7 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                     limit, no_new, previous_cards, query_seen_hrefs = adaptive_query_limit(max_leads - len(results), limits['query_limit']), 0, 0, set()
                     candidate_buffer = []
                     for _ in range(limits['max_scrolls']):
+                        local['discovery_scrolls'] += 1
                         if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']: break
                         snap_started = time.perf_counter()
                         try:
@@ -977,7 +1062,7 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                             query_seen_hrefs.add(href); local['candidate_cards_seen'] += 1
                             text = f"{card.get('card_text', '')} {card.get('card_aria', '')}"
                             item = {'href': href, 'title': card.get('title', ''), 'card_text': text,
-                                'rating': parse_rating(text), 'reviews_count': parse_reviews(text) if re.search(r'avaliações|reviews?', text, re.I) else None,
+                                'rating': parse_rating(text), 'reviews_count': parse_reviews(text) if re.search(r'avali|reviews?', text, re.I) else None,
                                 'google_sponsored': bool(re.search(r'patrocinado', text, re.I))}
                             identity = candidate_identity(item)
                             if not identity or identity in seen_candidates: local['candidates_duplicate'] += 1; continue
@@ -1106,9 +1191,12 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                     previous_cards = 0
                     query_seen_hrefs = set()
                     for _ in range(limits['max_scrolls']):
+                        inc('discovery_scrolls')
                         if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']:
                             break
                         links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
+                        if job_dict is not None:
+                            job_dict['dynamic_cards_loaded'] = max(int(job_dict.get('dynamic_cards_loaded', 0)), len(links))
                         new_count = 0
                         for link in links:
                             href = link.get_attribute('href') or ''
@@ -1120,7 +1208,7 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             inc('candidate_cards_seen')
                             card = candidate_card_metadata(link)
                             card_text = f'{card.get("text", "")} {card.get("aria", "")}'
-                            item = {'href': href, 'title': link.get_attribute('aria-label') or '', 'card_text': card_text, 'rating': parse_rating(card_text), 'reviews_count': parse_reviews(card_text) if re.search(r'avaliações|reviews?', card_text, re.I) else None, 'google_sponsored': bool(re.search(r'patrocinado', card_text, re.I))}
+                            item = {'href': href, 'title': link.get_attribute('aria-label') or '', 'card_text': card_text, 'rating': parse_rating(card_text), 'reviews_count': parse_reviews(card_text) if re.search(r'avali|reviews?', card_text, re.I) else None, 'google_sponsored': bool(re.search(r'patrocinado', card_text, re.I))}
                             identity = candidate_identity(item)
                             if not identity or identity in seen_candidates:
                                 inc('candidates_duplicate')
@@ -1150,12 +1238,19 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             goto_started = time.perf_counter()
                             detail_page.goto(item['href'], wait_until='commit', timeout=10000)
                             timings['goto_ms'] = (time.perf_counter() - goto_started) * 1000
+                            if not validate_detail_identity(detail_page, item):
+                                inc('detail_failed')
+                                continue
                             detail = extract_basic_place_detail(
                                 detail_page, fast=True, item=item,
                                 ready_wait_ms=limits['detail_ready_wait_ms'],
                                 timings=timings,
                             )
                             detail.update({'place_name': detail.get('place_name') or item['title'], 'city': city, 'state': state, 'country_code': 'BR', 'google_sponsored': item['google_sponsored']})
+                            if not detail.get('reviews_count') and item.get('reviews_count') is not None:
+                                detail['reviews_count'] = item['reviews_count']
+                            if not detail.get('total_score') and item.get('rating') is not None:
+                                detail['total_score'] = str(item['rating'])
                             qualification_started = time.perf_counter()
                             phone_retry_started = time.perf_counter()
                             wa = detail.get('whatsapp') or ''
@@ -1193,13 +1288,21 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                             if not detail.get('website'):
                                 detail['website'] = optional.get('website', '')
                             detail.update({key: optional.get(key, default) for key, default in {
-                                'instagram': [], 'google_result_cnpj': '', 'web_results': [],
+                                'instagram': [], 'facebook': [], 'linkedin': [], 'google_result_cnpj': '', 'web_results': [],
                                 'instagram_source': '', 'cnpj_source': '',
                             }.items()})
+                            detail['cnpj'] = detail.get('google_result_cnpj') or detail.get('cnpj') or ''
+                            detail['cnpj_source'] = 'google_web_results' if detail['cnpj'] else ''
                             if optional.get('web_results'):
                                 inc('web_results_found')
                             if optional.get('instagram'):
                                 inc('web_results_instagram_found')
+                            if optional.get('facebook'):
+                                inc('facebook_found')
+                            if optional.get('linkedin'):
+                                inc('linkedin_found')
+                            if detail.get('cnpj'):
+                                inc('cnpj_found')
                             place_key = f'{detail.get("place_name", "")}|{detail.get("street") or detail.get("address") or ""}'.lower()
                             if (place_key != '|' and place_key in seen_places) or wa in seen_phones:
                                 inc('candidates_duplicate')

@@ -22,12 +22,16 @@ from src.gmaps_playwright_scraper import (
     extract_candidate_cards_snapshot,
     extract_basic_place_snapshot,
     next_detail_batch_size,
+    stable_source_key,
+    validate_detail_identity,
 )
+from src.supabase_writer import lead_row
 from src.gmaps_web_ui import make_payload
 
 
 def test_niche_classifier_rejects_negative_terms():
     assert classify_business_niche({'title': 'Clínica de Estética Facial'}) is True
+    assert classify_business_niche({'title': 'Clínica médica'}) is True
     assert classify_business_niche({'title': 'Estética Animal Pet Shop'}) is False
     assert classify_business_niche({'title': 'Barbearia Estética Masculina'}) is False
 
@@ -51,6 +55,8 @@ def test_google_web_results_keep_metadata_and_sources():
                 'title': 'Empresa | Doctoralia',
                 'snippet': 'Consulta e agendamento',
             },
+            {'url': 'https://facebook.com/empresa', 'title': 'Empresa Facebook', 'snippet': ''},
+            {'url': 'https://linkedin.com/company/empresa', 'title': 'Empresa LinkedIn', 'snippet': 'CNPJ: 12.345.678/0001-90'},
         ],
     })
     assert result['instagram'] == ['https://www.instagram.com/empresa']
@@ -59,6 +65,10 @@ def test_google_web_results_keep_metadata_and_sources():
     assert result['web_results'][0]['domain'] == 'instagram.com'
     assert result['web_results'][0]['snippet'] == 'Agende sua avaliação pelo WhatsApp'
     assert result['web_results'][1]['type'] == 'directory'
+    assert result['facebook'] == ['https://facebook.com/empresa']
+    assert result['linkedin'] == ['https://linkedin.com/company/empresa']
+    # The block-level CNPJ wins over a conflicting unrelated snippet.
+    assert result['cnpj'] == '00.000.000/0001-00'
 
 
 def test_payload_preserves_legacy_and_addendum_fields():
@@ -221,3 +231,22 @@ def test_basic_detail_snapshot_returns_expected_fields():
     fields = extract_basic_place_snapshot(Page())
     assert fields['place_name'] == 'Clínica'
     assert fields['phone_raw'] == '+55 67 99999-9999'
+
+
+def test_source_key_is_stable_and_supabase_row_preserves_discovery_only():
+    lead = {'place_name': 'Clínica', 'address': 'Rua A, 10', 'google_maps_url': 'https://maps.google.com/place/x', 'phone_raw': '(67) 99999-9999', 'category': 'estética'}
+    assert stable_source_key(lead) == stable_source_key(dict(lead))
+    row = lead_row({**lead, 'qualification_status': 'qualified', 'instagram': ['https://instagram.com/x']}, 'estética', 'Campo Grande', 'MS')
+    assert row['id'].startswith('gmaps:')
+    assert row['source'] == 'google_maps'
+    assert row['instagram'] == ['https://instagram.com/x']
+    assert 'lead_status' not in row
+    assert 'followup_count' not in row
+
+
+def test_profile_identity_rejects_stale_url():
+    class Page:
+        url = 'https://www.google.com/maps/place/other'
+        def query_selector(self, _selector):
+            return None
+    assert validate_detail_identity(Page(), {'href': 'https://www.google.com/maps/place/expected', 'title': 'Clínica'}) is False
