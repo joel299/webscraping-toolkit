@@ -10,7 +10,10 @@ import urllib.parse
 import urllib.request
 from typing import Iterable
 
-from .gmaps_playwright_scraper import format_whatsapp, parse_reviews, stable_source_key
+try:
+    from .gmaps_playwright_scraper import format_whatsapp, parse_reviews, stable_source_key
+except ImportError:
+    from gmaps_playwright_scraper import format_whatsapp, parse_reviews, stable_source_key
 
 TABLE = "prospect_leads_google"
 DISCOVERY_COLUMNS = {

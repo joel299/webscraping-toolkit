@@ -129,7 +129,9 @@ HTML_PORTAL = r'''<!DOCTYPE html>
 'use strict';
 var currentJobId = null;
 var pollTimer = null;
+var pollRetryCount = 0;
 var currentLeads = [];
+var POLL_RETRY_DELAYS = [1500, 2000, 3000, 5000, 5000];
 
 function el(id){ return document.getElementById(id); }
 function text(v){ return (v === null || v === undefined || v === '') ? '-' : String(v); }
@@ -158,6 +160,7 @@ function enableEnrich(enable){
 async function startExtraction(ev){
   ev.preventDefault();
   if (pollTimer) clearTimeout(pollTimer);
+  pollRetryCount = 0;
   currentJobId = null; currentLeads = []; renderLeadsTable([]); enableEnrich(false);
   el('statusCard').classList.remove('hidden');
   el('btnScrape').disabled = true;
@@ -199,6 +202,8 @@ async function pollJobStatus(){
   try {
     var res = await fetch('/api/job/' + encodeURIComponent(currentJobId));
     var job = await res.json();
+    if (!res.ok) throw new Error(job.error || ('Falha ao consultar o job (' + res.status + ')'));
+    pollRetryCount = 0;
     currentLeads = job.leads || [];
     renderLeadsTable(currentLeads);
     el('jobLog').textContent = job.log || job.message || 'Processando...';
@@ -225,9 +230,17 @@ async function pollJobStatus(){
       setBadge('Erro', 'err'); el('btnScrape').disabled = false; el('btnScrape').innerHTML = '<i class="fa-solid fa-play"></i> Tentar novamente'; if (currentLeads.length) enableEnrich(true);
     }
   } catch(err) {
-    console.error(err);
-    setBadge('Erro', 'err');
-    el('jobLog').textContent = err.message || 'Falha de comunicação com o servidor.';
+    console.error('[API] job poll failed', err);
+    if (pollRetryCount < POLL_RETRY_DELAYS.length) {
+      var delay = POLL_RETRY_DELAYS[pollRetryCount];
+      pollRetryCount += 1;
+      setBadge('Reconectando (' + pollRetryCount + '/' + POLL_RETRY_DELAYS.length + ')', 'warn');
+      el('jobLog').textContent = 'Falha temporária de comunicação. Tentando novamente em ' + (delay / 1000) + 's...';
+      pollTimer = setTimeout(pollJobStatus, delay);
+      return;
+    }
+    setBadge('Conectividade perdida', 'err');
+    el('jobLog').textContent = 'Não foi possível consultar o job após várias tentativas. O job não foi duplicado; tente consultar novamente.';
     el('btnScrape').disabled = false;
     el('btnScrape').innerHTML = '<i class="fa-solid fa-play"></i> Tentar novamente';
   }
@@ -937,6 +950,7 @@ def run_enrich_inline(job_proxy, webhook_url=None):
         job_proxy.sync()
 
 def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full'):
+    print('[WORKER] job started', flush=True)
     initial_job = dict(jobs_dict.get(job_id) or {})
     job_proxy = JobProxy(job_id, jobs_dict, initial_job)
     try:
@@ -957,6 +971,7 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
         job_proxy['phase'] = 'scrape'
         job_proxy['finished_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
         job_proxy['log'] = f'Coleta concluída: {len(job_proxy["leads"])} leads.'
+        print('[WORKER] job completed', flush=True)
         job_proxy.sync()
         if mode == 'fast':
             final_payload = make_payload(job_proxy)
@@ -979,6 +994,7 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
             job_proxy['log'] = 'Coleta concluída. Enriquecimento aguardando acionamento manual.'
             job_proxy.sync()
     except Exception as exc:
+        print(f'[WORKER] job error type={type(exc).__name__}', flush=True)
         job_proxy['status'] = 'error'
         job_proxy['error'] = str(exc)
         job_proxy['log'] = 'Erro na coleta: ' + str(exc)
@@ -1082,6 +1098,9 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(out.getvalue().encode('utf-8'))
             return
+        if parsed.path == '/api/health':
+            self.send_json({'ok': True, 'service': 'webscraping-toolkit'})
+            return
         if parsed.path.startswith('/api/job/'):
             job_id = parsed.path.split('/')[-1]
             jobs_dict = get_jobs_dict()
@@ -1089,6 +1108,7 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             if not job:
                 self.send_json({'error': 'job not found'}, 404)
                 return
+            print(f'[API] job poll id={job_id}', flush=True)
             if job.get('status') == 'running' and time.time() - job.get('last_activity', time.time()) > 180:
                 job['status'] = 'error'
                 job['error'] = 'Timeout: extração inativa por mais de 3 minutos.'
@@ -1123,6 +1143,7 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
 
             proc = multiprocessing.Process(target=worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode), daemon=True)
             proc.start()
+            print(f'[API] scrape created job={job_id}', flush=True)
             self.send_json({'job_id': job_id, 'status': 'started'})
             return
 
@@ -1152,7 +1173,7 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
 def main():
     get_jobs_dict()
     httpd = ThreadingHTTPServer(('0.0.0.0', 8990), CustomHTTPHandler)
-    print('Stark Scraper Studio listening on http://0.0.0.0:8990', flush=True)
+    print('[HTTP] server started :8990', flush=True)
     httpd.serve_forever()
 
 if __name__ == '__main__':
