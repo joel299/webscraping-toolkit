@@ -34,7 +34,7 @@ def worker(job,req,w,shard):
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"status":"running","started_at":now(),"retry_count":attempt})
    _,c=remote(base,"/api/v1/jobs","POST",{"name":"V2 "+job+" "+w,"keywords":[query],"lang":"pt","zoom":15,"depth":1,"max_time":120}); pid=c["id"]
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"provider_job_id":pid,"query_set":[query]})
-   for tick in range(50):
+   for tick in range(70):
     if job in CANCEL:
      if pid: remote(base,"/api/v1/jobs/"+pid,"DELETE")
      raise RuntimeError("cancelled")
@@ -90,7 +90,7 @@ def persist_lead(job,w,shard,item):
 def run(job,req,shards):
  ts=[threading.Thread(target=worker,args=(job,req,s["worker_id"],s["shard_id"]),daemon=True) for s in shards]
  for t in ts:t.start()
- deadline=time.monotonic()+180
+ deadline=time.monotonic()+240
  for t in ts:
   t.join(max(0,deadline-time.monotonic()))
  if any(t.is_alive() for t in ts):
@@ -114,6 +114,31 @@ def public_event(e):
     public={k:payload.get(k) for k in allowed if payload.get(k) is not None}
     public["public_stage"] = {"place_discovered":"Encontrado","place_ready":"Qualificado","place_persisted":"Persistido","place_rejected":"Rejeitado","place_enriched":"Completo"}.get(e.get("event_type"),"Coletando detalhes")
     return {"id":e.get("id"),"event_type":e.get("event_type"),"place_identity":e.get("place_identity"),"occurred_at":e.get("occurred_at"),"public_place":public}
+
+
+def ingest_stream(provider_id, raw):
+    _, shards = supa("/rest/v1/scraper_job_shards?provider_job_id=eq."+urllib.parse.quote(provider_id,safe="")+"&select=job_id,shard_id,worker_id")
+    if not shards: return 404, {"error":"unknown_provider_job"}
+    shard=shards[0]; job_id=shard["job_id"]
+    _, jobs = supa("/rest/v1/scraper_jobs?id=eq."+urllib.parse.quote(job_id,safe="")+"&select=requested_category,city,state")
+    if not jobs: return 404, {"error":"unknown_parent_job"}
+    raw=dict(raw or {})
+    if raw.get("web_site") and not raw.get("website"): raw["website"]=raw["web_site"]
+    if raw.get("input_id") and not raw.get("place_id"): raw["place_id"]=raw["input_id"]
+    req={"requested_category":jobs[0].get("requested_category"),"city":jobs[0].get("city"),"state":jobs[0].get("state")}
+    item=normalize_place(raw,req); ident_value=item["place_identity"]
+    with ACCEPTED_LOCK:
+        seen=SEEN.setdefault(job_id,set()); qualified=QUALIFIED.setdefault(job_id,set()); aliases=ALIASES.setdefault(job_id,{})
+        hit=next((aliases[a] for a in identity_aliases(raw) if a in aliases),None)
+        if hit: ident_value=hit; item["place_identity"]=hit
+        if ident_value in seen: return 200,{"accepted":False,"duplicate":True,"place_identity":ident_value}
+        seen.add(ident_value)
+        for a in identity_aliases(raw): aliases[a]=ident_value
+        is_qualified=item["qualification_status"]=="qualified"
+        if is_qualified: qualified.add(ident_value)
+    ev(job_id,shard["shard_id"],"place_discovered",item,{"source":"stark_writer","provider_job_id":provider_id})
+    ev(job_id,shard["shard_id"],"place_rejected" if not is_qualified else "place_ready",item,{"source":"stark_writer","provider_job_id":provider_id})
+    return 200,{"accepted":True,"duplicate":False,"place_identity":ident_value,"qualified":is_qualified}
 
 class H(BaseHTTPRequestHandler):
  def send(self,s,x,ct="application/json",cache="no-store"):
@@ -160,10 +185,16 @@ class H(BaseHTTPRequestHandler):
   return self.send(404,{"error":"not_found"})
  def do_POST(self):
   p=self.path.split("?")[0]
+  if p=="/internal/v2/maps/result":
+   try:
+    x=self.data(); pid=str(x.get("provider_job_id") or "")
+    if not pid or not isinstance(x.get("entry"),dict): return self.send(400,{"error":"provider_job_id_and_entry_required"})
+    code,out=ingest_stream(pid,x["entry"]); return self.send(code,out)
+   except Exception: return self.send(500,{"error":"internal_ingest_failed"})
   if p=="/api/v2/scrape":
    x=self.data();
    if x.get("max_leads") == 0: return self.send(400,{"error":"max_leads must be positive or null"})
-   job=str(uuid.uuid4()); req={"category":str(x.get("category") or ""),"city":str(x.get("city") or ""),"state":str(x.get("state") or ""),"max_leads":(int(x["max_leads"]) if x.get("max_leads") is not None else None),"target_mode":"limited" if x.get("max_leads") is not None else "all_available","persist":bool(x.get("persist",False))}; supa("/rest/v1/scraper_jobs","POST",{"id":job,"requested_category":req["category"],"city":req["city"],"state":req["state"],"target":req["max_leads"],"target_mode":req["target_mode"],"worker_count":2,"reviews_mode":"summary","status":"queued","dry_run":not req["persist"],"created_at":now(),"updated_at":now()}); shards=[{"job_id":job,"shard_id":job+"-"+w,"worker_id":w,"status":"queued","query_set":[]} for w in ("A","B")]; supa("/rest/v1/scraper_job_shards","POST",shards); patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"running","updated_at":now()}); threading.Thread(target=run,args=(job,req,shards),daemon=True).start(); return self.send(202,{"job_id":job,"status":"queued","persist":req["persist"]})
+   job=str(uuid.uuid4()); req={"category":str(x.get("category") or ""),"city":str(x.get("city") or ""),"state":str(x.get("state") or ""),"max_leads":(int(x["max_leads"]) if x.get("max_leads") is not None else None),"target_mode":"limited" if x.get("max_leads") is not None else "all_available","persist":bool(x.get("persist",False)),"worker_count":int(x.get("worker_count",1))}; supa("/rest/v1/scraper_jobs","POST",{"id":job,"requested_category":req["category"],"city":req["city"],"state":req["state"],"target":req["max_leads"],"target_mode":req["target_mode"],"worker_count":req["worker_count"],"reviews_mode":"summary","status":"queued","dry_run":not req["persist"],"created_at":now(),"updated_at":now()}); shards=[{"job_id":job,"shard_id":job+"-"+w,"worker_id":w,"status":"queued","query_set":[]} for w in ("A","B")[:req["worker_count"]]]; supa("/rest/v1/scraper_job_shards","POST",shards); patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"running","updated_at":now()}); threading.Thread(target=run,args=(job,req,shards),daemon=True).start(); return self.send(202,{"job_id":job,"status":"queued","persist":req["persist"]})
   if p.startswith("/api/v2/jobs/") and p.endswith("/cancel"):
    job=p.split("/")[4]; CANCEL.add(job); patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"cancelled","stop_reason":"cancelled","updated_at":now()}); return self.send(202,{"job_id":job,"status":"cancelled"})
   return self.send(404,{"error":"not_found"})
