@@ -1019,7 +1019,7 @@ def multi_worker_scrape_process(job_id, category, city, state, max_leads, webhoo
             elif worker.get('status') in ('running', 'pending'):
                 stalled_since.setdefault(worker_id, now)
             status = worker.get('status', 'pending')
-            alive = bool(proc.is_alive())
+            alive = bool(getattr(proc, 'is_alive', lambda: status in ('running', 'pending', 'retrying'))())
             if alive and status in ('running', 'pending', 'retrying'):
                 all_terminal = False
             progress.append({'worker_index': index, 'worker_id': worker_id,
@@ -1047,9 +1047,16 @@ def multi_worker_scrape_process(job_id, category, city, state, max_leads, webhoo
         time.sleep(0.5)
 
     for _, _, proc in processes:
-        proc.join(timeout=10)
-        if proc.is_alive():
-            proc.terminate(); proc.join(timeout=5)
+        try:
+            proc.join(timeout=10)
+        except TypeError:
+            proc.join()
+        if bool(getattr(proc, 'is_alive', lambda: False)()):
+            proc.terminate()
+            try:
+                proc.join(timeout=5)
+            except TypeError:
+                proc.join()
 
     worker_states = [dict(jobs_dict.get(worker_id) or {}) for _, worker_id, _ in processes]
     all_leads = [lead for worker in worker_states for lead in (worker.get('leads') or [])]
