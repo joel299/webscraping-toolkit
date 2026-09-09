@@ -47,7 +47,8 @@ def test_multi_worker_aggregates_failure_without_blocking_sibling(monkeypatch):
     jobs = {'job': {'job_id': 'job', 'category': 'c', 'city': 'x', 'state': 'y'}}
     monkeypatch.setenv('SCRAPER_WORKER_RETRIES', '0')
     web_ui.multi_worker_scrape_process('job', 'c', 'x', 'y', 10, '', jobs, 'fast', 2)
-    assert jobs['job']['status'] == 'completed'
+    assert jobs['job']['status'] == 'partial'
+    assert jobs['job']['stop_reason'] == 'worker_error'
     assert jobs['job']['current_count'] == 1
     assert jobs['job']['worker_failures'] == 1
     assert jobs['job']['worker_progress'][1]['current_count'] == 1
