@@ -117,7 +117,7 @@ def public_event(e):
 
 class H(BaseHTTPRequestHandler):
  def send(self,s,x,ct="application/json",cache="no-store"):
-  b=x.encode() if isinstance(x,str) else json.dumps(x,ensure_ascii=False).encode(); self.send_response(s); self.send_header("Content-Type",ct); self.send_header("X-Stark-Revision",REV); self.send_header("Cache-Control",cache); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+  b=x if isinstance(x,bytes) else (x.encode() if isinstance(x,str) else json.dumps(x,ensure_ascii=False).encode()); self.send_response(s); self.send_header("Content-Type",ct); self.send_header("X-Stark-Revision",REV); self.send_header("Cache-Control",cache); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
  def asset(self,p):
   root=Path("/app/dist/assets").resolve()
   try: f=(root / urllib.parse.unquote(p[len("/v2/assets/"):])).resolve()
