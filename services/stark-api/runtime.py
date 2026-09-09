@@ -1,7 +1,7 @@
 import csv,hashlib,io,json,os,threading,time,urllib.request,uuid
 from datetime import datetime,timezone
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
-SUPA=os.getenv("SUPABASE_URL","").rstrip("/"); KEY=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY",""); GOSOMS=[os.getenv("GOSOM_A_URL","http://stark-v2-maps-a:8080"),os.getenv("GOSOM_B_URL","http://stark-v2-maps-b:8080")]; CANCEL=set()
+SUPA=os.getenv("SUPABASE_URL","").rstrip("/"); KEY=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY",""); GOSOMS=[os.getenv("GOSOM_A_URL","http://stark-v2-maps-a:8080"),os.getenv("GOSOM_B_URL","http://stark-v2-maps-b:8080")]; CANCEL=set(); ACCEPTED={}; ACCEPTED_LOCK=threading.Lock()
 def now(): return datetime.now(timezone.utc).isoformat()
 def h(): return {"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"return=representation"}
 def supa(path,method="GET",data=None):
@@ -32,7 +32,13 @@ def worker(job,req,w,shard):
    time.sleep(3)
   raw=urllib.request.urlopen(base+"/api/v1/jobs/"+pid+"/download",timeout=90).read().decode(errors="replace"); rows=list(csv.DictReader(io.StringIO(raw))); patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"status":"completed","completed_at":now(),"qualified_count":len(rows)})
   for x in rows:
-   item=norm(x,req,w); ev(job,shard,"place_discovered",item); ev(job,shard,"place_rejected" if item["qualification_status"]=="rejected" else "place_ready",item)
+   item=norm(x,req,w)
+   with ACCEPTED_LOCK:
+    seen=ACCEPTED.setdefault(job,set())
+    if item["place_identity"] in seen or len(seen)>=req["max_leads"]:
+     continue
+    seen.add(item["place_identity"])
+   ev(job,shard,"place_discovered",item); ev(job,shard,"place_rejected" if item["qualification_status"]=="rejected" else "place_ready",item)
    if req.get("persist") and item["qualification_status"]=="qualified":
     try:
      payload={"id":item["place_identity"],"place_name":item["place_name"],"total_score":item["total_score"],"reviews_count":item["reviews_count"],"address":item["address"],"website":item["website"],"whatsapp":item["whatsapp"],"source":"google_maps","source_category":item["requested_category"],"observed_category":item["observed_category"],"source_city":item["source_city"],"source_state":item["source_state"],"google_maps_url":item["google_maps_url"],"qualification_status":"qualified","qualification_stage":"category_gate","contact_ready":item["contact_ready"],"v2_last_job_id":job,"v2_worker_label":w,"persistence_verified":True,"persistence_verified_at":now(),"lead_status":"new","pipeline_stage":"new","responded":False,"converted":False}
@@ -64,7 +70,7 @@ class H(BaseHTTPRequestHandler):
  def do_POST(self):
   p=self.path.split("?")[0]
   if p=="/api/v2/scrape":
-   x=self.data(); job=str(uuid.uuid4()); req={"category":str(x.get("category") or ""),"city":str(x.get("city") or ""),"state":str(x.get("state") or ""),"max_leads":int(x.get("max_leads",20)),"persist":bool(x.get("persist",False))}; supa("/rest/v1/scraper_jobs","POST",{"id":job,"requested_category":req["category"],"city":req["city"],"state":req["state"],"target":req["max_leads"],"worker_count":2,"reviews_mode":"summary","status":"queued","dry_run":not req["persist"],"created_at":now(),"updated_at":now()}); shards=[{"job_id":job,"shard_id":job+"-"+w,"worker_id":w,"status":"queued","query_set":[]} for w in ("A","B")]; supa("/rest/v1/scraper_job_shards","POST",shards); threading.Thread(target=run,args=(job,req,shards),daemon=True).start(); return self.send(202,{"job_id":job,"status":"queued","persist":req["persist"]})
+   x=self.data(); job=str(uuid.uuid4()); req={"category":str(x.get("category") or ""),"city":str(x.get("city") or ""),"state":str(x.get("state") or ""),"max_leads":int(x.get("max_leads",20)),"persist":bool(x.get("persist",False))}; supa("/rest/v1/scraper_jobs","POST",{"id":job,"requested_category":req["category"],"city":req["city"],"state":req["state"],"target":req["max_leads"],"worker_count":2,"reviews_mode":"summary","status":"queued","dry_run":not req["persist"],"created_at":now(),"updated_at":now()}); shards=[{"job_id":job,"shard_id":job+"-"+w,"worker_id":w,"status":"queued","query_set":[]} for w in ("A","B")]; supa("/rest/v1/scraper_job_shards","POST",shards); patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"running","updated_at":now()}); threading.Thread(target=run,args=(job,req,shards),daemon=True).start(); return self.send(202,{"job_id":job,"status":"queued","persist":req["persist"]})
   if p.startswith("/api/v2/jobs/") and p.endswith("/cancel"):
    job=p.split("/")[4]; CANCEL.add(job); patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"cancelled","stop_reason":"cancelled","updated_at":now()}); return self.send(202,{"job_id":job,"status":"cancelled"})
   return self.send(404,{"error":"not_found"})
