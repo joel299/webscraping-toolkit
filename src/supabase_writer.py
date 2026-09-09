@@ -11,9 +11,9 @@ import urllib.request
 from typing import Iterable
 
 try:
-    from .gmaps_playwright_scraper import format_whatsapp, parse_reviews, stable_source_key
+    from .gmaps_playwright_scraper import format_whatsapp, parse_rating, parse_reviews, stable_source_key
 except ImportError:
-    from gmaps_playwright_scraper import format_whatsapp, parse_reviews, stable_source_key
+    from gmaps_playwright_scraper import format_whatsapp, parse_rating, parse_reviews, stable_source_key
 
 TABLE = "prospect_leads_google"
 DISCOVERY_COLUMNS = {
@@ -52,7 +52,7 @@ def lead_row(lead: dict, category: str = "", city: str = "", state: str = "") ->
     row = {
         "id": stable_source_key(lead),
         "place_name": str(lead.get("place_name") or "").strip(),
-        "total_score": float(str(lead.get("total_score") or "0").replace(",", ".")) if lead.get("total_score") else None,
+        "total_score": parse_rating(lead.get("total_score")),
         "reviews_count": _int_or_none(lead.get("reviews_count")),
         "address": str(lead.get("address") or "").strip() or None,
         "website": str(lead.get("website") or "").strip() or None,

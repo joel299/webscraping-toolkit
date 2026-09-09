@@ -142,3 +142,8 @@ def test_non_duplicate_409_remains_failure(monkeypatch):
     assert result['ok'] is False
     assert writer.metrics['supabase_conflicts_recovered'] == 0
     assert writer.metrics['supabase_failed'] == 1
+
+
+def test_lead_row_ignores_google_placeholder_rating():
+    row = sw.lead_row({"place_name": "Clinica", "total_score": "·", "whatsapp": "5567999999999"})
+    assert row["total_score"] is None
