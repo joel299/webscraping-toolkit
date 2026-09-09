@@ -1,4 +1,4 @@
-import csv,hashlib,io,json,os,threading,time,urllib.request,urllib.parse,uuid
+import csv,hashlib,io,json,mimetypes,os,threading,time,urllib.request,urllib.parse,uuid
 from datetime import datetime,timezone
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
@@ -116,11 +116,20 @@ def public_event(e):
     return {"id":e.get("id"),"event_type":e.get("event_type"),"place_identity":e.get("place_identity"),"occurred_at":e.get("occurred_at"),"public_place":public}
 
 class H(BaseHTTPRequestHandler):
- def send(self,s,x,ct="application/json"):
-  b=x.encode() if isinstance(x,str) else json.dumps(x,ensure_ascii=False).encode(); self.send_response(s); self.send_header("Content-Type",ct); self.send_header("X-Stark-Revision",REV); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+ def send(self,s,x,ct="application/json",cache="no-store"):
+  b=x.encode() if isinstance(x,str) else json.dumps(x,ensure_ascii=False).encode(); self.send_response(s); self.send_header("Content-Type",ct); self.send_header("X-Stark-Revision",REV); self.send_header("Cache-Control",cache); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+ def asset(self,p):
+  root=Path("/app/dist/assets").resolve()
+  try: f=(root / urllib.parse.unquote(p[len("/v2/assets/"):])).resolve()
+  except Exception: return self.send(404,{"error":"not_found"})
+  if root not in f.parents or not f.is_file(): return self.send(404,{"error":"not_found"})
+  ct=mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+  return self.send(200,f.read_bytes(),ct,"public, max-age=31536000, immutable")
  def data(self):return json.loads(self.rfile.read(int(self.headers.get("Content-Length",0)) or 0) or b"{}")
  def do_GET(self):
   p=self.path.split("?")[0]
+  if p.startswith("/v2/assets/"):
+   return self.asset(p)
   if p in ("/v2","/v2/"):
    dist=Path("/app/dist/index.html")
    if dist.exists(): return self.send(200,dist.read_text(),"text/html")
