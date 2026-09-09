@@ -52,3 +52,9 @@ def test_multi_worker_aggregates_failure_without_blocking_sibling(monkeypatch):
     assert jobs['job']['current_count'] == 1
     assert jobs['job']['worker_failures'] == 1
     assert jobs['job']['worker_progress'][1]['current_count'] == 1
+
+
+def test_coordinator_is_not_daemon():
+    source = web_ui.Path(web_ui.__file__).read_text() if hasattr(web_ui, "Path") else __import__("pathlib").Path(web_ui.__file__).read_text()
+    assert "target=multi_worker_scrape_process" in source
+    assert "target=multi_worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode, worker_count), daemon=False" in source

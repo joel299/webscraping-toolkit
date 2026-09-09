@@ -1335,7 +1335,7 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
             jobs_dict[job_id] = {'job_id': job_id, 'status': 'pending', 'phase': 'scrape', 'mode': mode, 'auto_enrich': auto_enrich, 'category': category, 'city': city, 'state': state, 'max_leads': max_leads, 'webhook': webhook_url, 'current_count': 0, 'leads': [], 'worker_count': max(1, min(int(payload.get('worker_count') or os.environ.get('SCRAPER_WORKER_COUNT', '2')), 8)), 'log': 'Aguardando início da coleta...'}
 
             worker_count = jobs_dict[job_id]['worker_count']
-            proc = multiprocessing.Process(target=multi_worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode, worker_count), daemon=True)
+            proc = multiprocessing.Process(target=multi_worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode, worker_count), daemon=False)
             proc.start()
             print(f'[API] scrape created job={job_id}', flush=True)
             self.send_json({'job_id': job_id, 'status': 'started'})
