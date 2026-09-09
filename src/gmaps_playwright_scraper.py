@@ -303,7 +303,7 @@ def scroll_observation(feed):
         const links = [...feed.querySelectorAll('a[href*="/maps/place/"]')];
         const ids = links.map(a => a.href || a.getAttribute('href') || '').filter(Boolean);
         const text = (feed.innerText || '').toLowerCase();
-        const endMarker = /(fim dos resultados|não há mais resultados|no more results|end of results)/i.test(text);
+        const endMarker = /(fim dos resultados|não há mais resultados|no more results|end of results|you.?ve reached the end of the list|você chegou ao fim da lista)/i.test(text);
         const state = [feed.scrollTop, feed.clientHeight, feed.scrollHeight, ids.slice(-8).join('|'), endMarker].join('|');
         return {scroll_top: feed.scrollTop, client_height: feed.clientHeight,
             scroll_height: feed.scrollHeight, identity_count: ids.length,
@@ -1203,8 +1203,27 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                         if len(results) >= max_leads: break
                         if observation.get('end_marker') or no_new >= limits['max_no_new_scrolls']: break
                         feed.evaluate('el => el.scrollTo(0, el.scrollHeight)'); search_page.mouse.wheel(0, 3500)
-                        try: search_page.wait_for_function('''([selector, count]) => document.querySelector(selector)?.querySelectorAll('a[href*="/maps/place/"]').length > count''', arg=['div[role="feed"]', len(cards)], timeout=limits['scroll_wait_ms'])
-                        except Exception: no_new += 1
+                        try:
+                            search_page.wait_for_function(
+                                '''([selector, before]) => {
+                                    const feed = document.querySelector(selector);
+                                    if (!feed) return false;
+                                    const links = [...feed.querySelectorAll('a[href*="/maps/place/"]')];
+                                    const ids = links.map(a => a.href || a.getAttribute('href') || '').filter(Boolean);
+                                    const text = (feed.innerText || '').toLowerCase();
+                                    const end = /(fim dos resultados|não há mais resultados|no more results|end of results|you.?ve reached the end of the list|você chegou ao fim da lista)/i.test(text);
+                                    const fingerprint = [feed.scrollTop, feed.clientHeight, feed.scrollHeight, ids.slice(-8).join('|'), end].join('|');
+                                    return fingerprint !== before || end;
+                                }''',
+                                arg=['div[role="feed"]', previous_fingerprint],
+                                timeout=limits['scroll_wait_ms'])
+                        except Exception:
+                            # Timeout is not proof of no progress in a virtualized feed.
+                            refreshed = scroll_observation(feed)
+                            if refreshed.get('fingerprint') == previous_fingerprint and not refreshed.get('end_marker'):
+                                no_new += 1
+                            else:
+                                no_new = 0
                     if candidate_buffer: batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number)
                     conversion = (len(results) - qualified_before) / max(local['details_opened'], 1)
                     if limits['dynamic_batch_size'] and batch_number:
