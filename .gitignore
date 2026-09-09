@@ -29,3 +29,4 @@ webscrapper_job_*.json
 # Editor
 .vscode/
 .idea/
+apps/stark-ui/node_modules/
