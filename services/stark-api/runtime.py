@@ -1,6 +1,7 @@
 import csv,hashlib,io,json,os,threading,time,urllib.request,urllib.parse,uuid
 from datetime import datetime,timezone
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+from pathlib import Path
 import sys
 ROOT=os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0,ROOT)
@@ -120,13 +121,30 @@ class H(BaseHTTPRequestHandler):
  def data(self):return json.loads(self.rfile.read(int(self.headers.get("Content-Length",0)) or 0) or b"{}")
  def do_GET(self):
   p=self.path.split("?")[0]
-  if p in ("/v2","/v2/"):return self.send(200,HTML,"text/html")
+  if p in ("/v2","/v2/"):
+   dist=Path("/app/dist/index.html")
+   if dist.exists(): return self.send(200,dist.read_text(),"text/html")
+   return self.send(200,HTML,"text/html")
   if p=="/api/v2/health":return self.send(200,{"ok":True,"service":"stark-v2-api","runtime_revision":REV,"upstream_sha":"beca11f148c7dc9651ee2da9aa9ce111f3dd3bea"})
   if p.startswith("/api/v2/jobs/"):
    job=p.split("/")[4]; _,j=supa("/rest/v1/scraper_jobs?id=eq."+job+"&select=*"); _,s=supa("/rest/v1/scraper_job_shards?job_id=eq."+job+"&select=*"); _,e=supa("/rest/v1/scraper_job_events?job_id=eq."+job+"&select=*&order=id.asc");
    if p.endswith("/events"):
     q=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query); after=int((q.get("after") or [0])[0]); limit=min(100,int((q.get("limit") or [50])[0])); page=[x for x in e if int(x.get("id") or 0)>after][:limit]; next_cursor=int(page[-1].get("id") or after) if page else after
     return self.send(200,{"job_id":job,"events":[public_event(x) for x in page],"next_cursor":next_cursor,"has_more":len([x for x in e if int(x.get("id") or 0)>next_cursor])>0})
+   if p.endswith("/places"):
+    q=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query); pg=max(1,int((q.get("page") or [1])[0])); size=min(100,max(1,int((q.get("page_size") or [25])[0]))); term=(q.get("q") or [""])[0].lower(); sort=(q.get("sort") or ["id"])[0]; order=(q.get("order") or ["asc"])[0]
+    places={}; seq=0
+    for x in e:
+     if x.get("event_type") not in ("place_discovered","place_ready","place_enriched","place_persisted"): continue
+     v=public_event(x).get("public_place") or {}; k=v.get("place_identity")
+     if not k: continue
+     if k not in places: places[k]={**v,"first_seen_seq":seq}; seq+=1
+     else: places[k]={**places[k],**{a:b for a,b in v.items() if b not in (None,"",[])}}
+    items=list(places.values())
+    if term: items=[v for v in items if term in " ".join(str(v.get(k) or "") for k in ("place_name","address","phone_raw","whatsapp","observed_category")).lower()]
+    if sort in ("place_name","total_score","reviews_count"): items.sort(key=lambda v:str(v.get(sort) or ""),reverse=order=="desc")
+    total=len(items); pages=(total+size-1)//size if total else 0; start=(pg-1)*size
+    return self.send(200,{"items":items[start:start+size],"page":pg,"page_size":size,"total_items":total,"total_pages":pages,"has_previous":pg>1,"has_next":pg<pages})
    public_workers=[{"worker_label":"Worker "+str(x.get("worker_id") or "?"),"status":x.get("status"),"qualified_count":x.get("qualified_count"),"retry_count":x.get("retry_count")} for x in s]
    base={k:v for k,v in (j[0] if j else {"error":"not_found"}).items() if k not in ("provider_job_id","query_set","shard_id","v2_last_job_id")}
    return self.send(200,{**base,"workers":public_workers,"event_count":len(e),"rejected_count":sum(x.get("event_type")=="place_rejected" for x in e),"persisted_count":sum(x.get("event_type")=="place_persisted" for x in e)})
