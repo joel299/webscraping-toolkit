@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && git clone --filter=blob:none https://github.com/gosom/google-maps-scraper.git src \
     && cd src && git checkout ${UPSTREAM_SHA}
 COPY services/maps-engine/gosom-stark.patch /build/gosom-stark.patch
+COPY services/maps-engine/starkwriter /build/src/starkwriter
 RUN cd /build/src && git apply /build/gosom-stark.patch && go mod download && CGO_ENABLED=0 go build -ldflags="-w -s" -o /usr/bin/google-maps-scraper
 FROM debian:trixie-slim
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
