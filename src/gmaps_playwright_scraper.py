@@ -265,8 +265,51 @@ def adaptive_query_limit(remaining_leads, configured_limit=50):
     return min(configured_limit, max(20, remaining_leads * 2))
 
 
+STOP_REASONS = {
+    'target_reached', 'source_exhausted', 'queries_exhausted', 'runtime_budget',
+    'query_budget', 'blocked_by_google', 'worker_error', 'partial_result',
+}
+
+
 def discovery_should_stop(current_count, target):
     return current_count >= target
+
+
+def discovery_stop_reason(*, captured, target, source_exhausted=False,
+                          queries_exhausted=False, runtime_budget=False,
+                          query_budget=False, blocked_by_google=False,
+                          worker_error=False):
+    """Return an honest terminal reason; a short result is never success."""
+    if captured >= target:
+        return 'target_reached'
+    if worker_error:
+        return 'worker_error'
+    if blocked_by_google:
+        return 'blocked_by_google'
+    if runtime_budget:
+        return 'runtime_budget'
+    if query_budget:
+        return 'query_budget'
+    if queries_exhausted:
+        return 'queries_exhausted'
+    if source_exhausted:
+        return 'source_exhausted'
+    return 'partial_result'
+
+
+def scroll_observation(feed):
+    """Read virtualized-feed progress without treating DOM card count as progress."""
+    return feed.evaluate('''feed => {
+        const links = [...feed.querySelectorAll('a[href*="/maps/place/"]')];
+        const ids = links.map(a => a.href || a.getAttribute('href') || '').filter(Boolean);
+        const text = (feed.innerText || '').toLowerCase();
+        const endMarker = /(fim dos resultados|não há mais resultados|no more results|end of results)/i.test(text);
+        const state = [feed.scrollTop, feed.clientHeight, feed.scrollHeight, ids.slice(-8).join('|'), endMarker].join('|');
+        return {scroll_top: feed.scrollTop, client_height: feed.clientHeight,
+            scroll_height: feed.scrollHeight, identity_count: ids.length,
+            identity_tail: ids.slice(-8), end_marker: endMarker,
+            fingerprint: state};
+    }''') or {}
 
 
 def low_yield_should_stop(consecutive_queries, threshold, maximum):
@@ -326,7 +369,7 @@ def initialize_discovery_metrics(job_dict, target):
     if job_dict is None:
         return
     job_dict.update({
-        'queries_started': 0, 'queries_completed': 0, 'queries_skipped': 0,
+        'queries_started': 0, 'queries_completed': 0, 'queries_skipped': 0, 'query_errors': 0, 'feed_missing': 0,
         'candidate_cards_seen': 0, 'candidates_unique': 0, 'candidates_duplicate': 0,
         'candidates_prequalified': 0, 'candidates_rejected_pre_detail': 0,
         'details_avoided': 0, 'qualified_leads': 0, 'target_leads': target,
@@ -340,7 +383,8 @@ def initialize_discovery_metrics(job_dict, target):
         'web_results_attempted': 0, 'web_results_skipped': 0,
         'web_results_found': 0, 'web_results_instagram_found': 0,
         'rejected_before_web_results': 0,
-        'discovery_scrolls': 0, 'dynamic_cards_loaded': 0,
+        'discovery_scrolls': 0, 'dynamic_cards_loaded': 0, 'scroll_fingerprints': [],
+        'scroll_no_progress': 0, 'source_end_marker_seen': False, 'candidate_identity_count': 0,
         'unique_candidates': 0, 'candidate_duplicates': 0,
         'detail_queue_size': 0, 'detail_workers': scraper_int_env('SCRAPER_DETAIL_CONCURRENCY', 3, 1),
         'detail_completed': 0, 'detail_failed': 0,
@@ -1107,12 +1151,26 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                         if job_dict is not None: job_dict['stop_reason'] = 'query_timeout'
                         continue
                     feed = search_page.wait_for_selector('div[role="feed"]', timeout=feed_timeout_ms)
-                    if not feed: continue
-                    limit, no_new, previous_cards, query_seen_hrefs = adaptive_query_limit(max_leads - len(results), limits['query_limit']), 0, 0, set()
+                    if not feed:
+                        if job_dict is not None: job_dict['feed_missing'] = int(job_dict.get('feed_missing', 0)) + 1
+                        continue
+                    limit, no_new, previous_fingerprint, query_seen_hrefs = adaptive_query_limit(max_leads - len(results), limits['query_limit']), 0, '', set()
                     candidate_buffer = []
                     for _ in range(limits['max_scrolls']):
                         local['discovery_scrolls'] += 1
                         if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']: break
+                        observation = scroll_observation(feed)
+                        fingerprint = observation.get('fingerprint', '')
+                        no_new = no_new + 1 if fingerprint and fingerprint == previous_fingerprint else 0
+                        previous_fingerprint = fingerprint
+                        if job_dict is not None:
+                            job_dict['dynamic_cards_loaded'] = max(int(job_dict.get('dynamic_cards_loaded', 0)), int(observation.get('identity_count', 0)))
+                            job_dict['candidate_identity_count'] = len(seen_candidates)
+                            job_dict['source_end_marker_seen'] = bool(observation.get('end_marker'))
+                            fps = list(job_dict.get('scroll_fingerprints') or [])
+                            if fingerprint: fps.append(fingerprint)
+                            job_dict['scroll_fingerprints'] = fps[-20:]
+                            job_dict['scroll_no_progress'] = no_new
                         snap_started = time.perf_counter()
                         try:
                             cards = extract_candidate_cards_snapshot(feed) if limits['card_snapshot'] else []
@@ -1140,11 +1198,10 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                             if len(candidate_buffer) >= current_batch_size:
                                 batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number); candidate_buffer.clear()
                                 if len(results) >= max_leads: break
-                        if candidate_buffer and (len(cards) >= limit or no_new >= limits['max_no_new_scrolls']):
+                        if candidate_buffer and (observation.get('end_marker') or no_new >= limits['max_no_new_scrolls']):
                             batch_number += 1; process_batch(candidate_buffer, detail_page, q_idx, batch_number); candidate_buffer.clear()
-                        if len(results) >= max_leads or len(cards) >= limit: break
-                        no_new = no_new + 1 if new_count == 0 and len(cards) <= previous_cards else 0; previous_cards = len(cards)
-                        if no_new >= limits['max_no_new_scrolls']: break
+                        if len(results) >= max_leads: break
+                        if observation.get('end_marker') or no_new >= limits['max_no_new_scrolls']: break
                         feed.evaluate('el => el.scrollTo(0, el.scrollHeight)'); search_page.mouse.wheel(0, 3500)
                         try: search_page.wait_for_function('''([selector, count]) => document.querySelector(selector)?.querySelectorAll('a[href*="/maps/place/"]').length > count''', arg=['div[role="feed"]', len(cards)], timeout=limits['scroll_wait_ms'])
                         except Exception: no_new += 1
@@ -1159,6 +1216,7 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                     if local.get('low_yield', 0) >= limits['max_low_yield_queries']: break
                 except Exception as exc:
                     if job_dict is not None:
+                        job_dict['query_errors'] = int(job_dict.get('query_errors', 0)) + 1
                         job_dict['last_activity'] = time.time()
                     print(f"⚠️ Error collecting query '{query}': {exc}", flush=True)
                 finally:
@@ -1186,14 +1244,25 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
                 'performance': {'detail': detail_summary, 'candidate_snapshot': job_dict['candidate_snapshot_ms'],
                                 'basic_detail_snapshot': summarize_samples(local['basic_detail_snapshot_ms'])}})
             job_dict.pop('detail_performance_samples', None); sync_job_metrics(len(queries), force=True)
-            job_dict['stop_reason'] = 'target_reached' if len(results) >= max_leads else (job_dict.get('stop_reason') or 'query_exhausted')
-            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results)}
+            existing_reason = job_dict.get('stop_reason')
+            job_dict['stop_reason'] = existing_reason if existing_reason in STOP_REASONS else discovery_stop_reason(
+                captured=len(results), target=max_leads,
+                source_exhausted=bool(job_dict.get('source_end_marker_seen') or job_dict.get('scroll_no_progress', 0) >= limits['max_no_new_scrolls']),
+                blocked_by_google=bool(job_dict.get('feed_missing') and not job_dict.get('discovery_scrolls')),
+                worker_error=bool(job_dict.get('query_errors') and not job_dict.get('feed_missing')),
+                queries_exhausted=job_dict.get('queries_completed', 0) >= len(queries),
+            )
+            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results),
+                'limit': 'max_leads' if job_dict['stop_reason'] == 'target_reached' else job_dict['stop_reason'],
+                'candidate_identity_count': len(seen_candidates), 'scrolls': job_dict.get('discovery_scrolls', 0)}
             job_dict['status'] = 'running'
     return results
 
 
 def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict, mode):
     limits = discovery_limits(max_leads)
+    query_budget_seconds = max(15.0, float(os.environ.get('SCRAPER_QUERY_BUDGET_SECONDS', '75')))
+    runtime_budget_seconds = max(query_budget_seconds, float(os.environ.get('SCRAPER_RUNTIME_BUDGET_SECONDS', '900')))
     if limits['pipeline_strategy'] == 'microbatch':
         return _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode)
     initialize_discovery_metrics(job_dict, max_leads)
@@ -1266,18 +1335,33 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                         continue
                     feed = page_search.wait_for_selector('div[role="feed"]', timeout=feed_timeout_ms)
                     if not feed:
+                        if job_dict is not None: job_dict['feed_missing'] = int(job_dict.get('feed_missing', 0)) + 1
                         continue
                     limit = adaptive_query_limit(max_leads - len(results), limits['query_limit'])
                     no_new = 0
-                    previous_cards = 0
+                    previous_fingerprint = ''
                     query_seen_hrefs = set()
                     for _ in range(limits['max_scrolls']):
                         inc('discovery_scrolls')
                         if len(results) >= max_leads or len(seen_candidates) >= limits['hard_cap']:
                             break
-                        links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
+                        observation = scroll_observation(feed)
+                        fingerprint = observation.get('fingerprint', '')
+                        if fingerprint and fingerprint == previous_fingerprint:
+                            no_new += 1
+                        else:
+                            no_new = 0
+                        previous_fingerprint = fingerprint
                         if job_dict is not None:
-                            job_dict['dynamic_cards_loaded'] = max(int(job_dict.get('dynamic_cards_loaded', 0)), len(links))
+                            job_dict['dynamic_cards_loaded'] = max(int(job_dict.get('dynamic_cards_loaded', 0)), int(observation.get('identity_count', 0)))
+                            job_dict['candidate_identity_count'] = len(seen_candidates)
+                            job_dict['source_end_marker_seen'] = bool(observation.get('end_marker'))
+                            fingerprints = list(job_dict.get('scroll_fingerprints') or [])
+                            if fingerprint:
+                                fingerprints.append(fingerprint)
+                            job_dict['scroll_fingerprints'] = fingerprints[-20:]
+                            job_dict['scroll_no_progress'] = no_new
+                        links = feed.query_selector_all('a.hfpxzc[href*="/maps/place/"], a[href*="/maps/place/"]')
                         new_count = 0
                         for link in links:
                             href = link.get_attribute('href') or ''
@@ -1420,11 +1504,11 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                                     job_dict['target_reached'] = True
                                     job_dict['early_stop_triggered'] = True
                                 break
-                        if len(results) >= max_leads or len(links) >= limit:
+                        if len(results) >= max_leads:
                             break
-                        no_new = no_new + 1 if new_count == 0 and len(links) <= previous_cards else 0
-                        previous_cards = len(links)
-                        if no_new >= limits['max_no_new_scrolls']:
+                        if no_new >= limits['max_no_new_scrolls'] or observation.get('end_marker'):
+                            if job_dict is not None and observation.get('end_marker'):
+                                job_dict['source_end_marker_seen'] = True
                             break
                         if links:
                             links[-1].scroll_into_view_if_needed()
@@ -1438,6 +1522,8 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
                     if low_yield_should_stop(low_yield, limits['low_yield_threshold'], limits['max_low_yield_queries']):
                         break
                 except Exception as exc:
+                    if job_dict is not None:
+                        job_dict['query_errors'] = int(job_dict.get('query_errors', 0)) + 1
                     print(f"⚠️ Error collecting query '{query}': {exc}", flush=True)
                 finally:
                     inc('queries_completed')
@@ -1499,8 +1585,17 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
             job_dict.pop('detail_performance_samples', None)
             job_dict['scrape_total_ms'] = round(elapsed, 2)
             job_dict['query_metrics'] = query_metrics
-            job_dict['stop_reason'] = 'target_reached' if len(results) >= max_leads else (job_dict.get('stop_reason') or 'query_exhausted')
-            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results)}
+            existing_reason = job_dict.get('stop_reason')
+            job_dict['stop_reason'] = existing_reason if existing_reason in STOP_REASONS else discovery_stop_reason(
+                captured=len(results), target=max_leads,
+                source_exhausted=bool(job_dict.get('source_end_marker_seen') or job_dict.get('scroll_no_progress', 0) >= limits['max_no_new_scrolls']),
+                blocked_by_google=bool(job_dict.get('feed_missing') and not job_dict.get('discovery_scrolls')),
+                worker_error=bool(job_dict.get('query_errors') and not job_dict.get('feed_missing')),
+                queries_exhausted=job_dict.get('queries_completed', 0) >= len(queries),
+            )
+            job_dict['stop_details'] = {'target': max_leads, 'captured': len(results),
+                'limit': 'max_leads' if job_dict['stop_reason'] == 'target_reached' else job_dict['stop_reason'],
+                'candidate_identity_count': len(seen_candidates), 'scrolls': job_dict.get('discovery_scrolls', 0)}
             job_dict['status'] = 'running'
     return results
 

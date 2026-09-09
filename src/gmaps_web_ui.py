@@ -1047,10 +1047,7 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
         print(f'[WORKER] job error type={type(exc).__name__}', flush=True)
         job_proxy['status'] = 'error'
         phase = job_proxy.get('last_phase') or 'worker_exception'
-        job_proxy['stop_reason'] = 'browser_startup_failed' if phase in {
-            'worker_started', 'scraper_entered', 'playwright_starting', 'playwright_started',
-            'chromium_launching', 'context_creating', 'search_page_creating',
-        } else 'worker_exception'
+        job_proxy['stop_reason'] = 'worker_error'
         job_proxy['stop_details'] = {'phase': phase, 'captured': len(job_proxy.get('leads') or [])}
         job_proxy['error'] = str(exc)
         job_proxy['log'] = 'Erro na coleta: ' + str(exc)
