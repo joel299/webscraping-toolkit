@@ -944,6 +944,13 @@ def generate_query_variations(category, city, state):
     return result
 
 
+def deterministic_query_shard(queries, worker_index=0, worker_count=1):
+    """Split queries deterministically; each process owns its browser state."""
+    worker_count = max(1, int(worker_count or 1))
+    worker_index = int(worker_index or 0) % worker_count
+    return list(queries)[worker_index::worker_count]
+
+
 def _prequalify_card(item, category):
     if not classify_business_niche({'title': item.get('title'), 'category': category, 'card_text': item.get('card_text')}):
         return 'category'
@@ -978,7 +985,7 @@ def next_detail_batch_size(conversion_rate, configured=6, dynamic=True, maximum=
     return max(2, min(maximum, 8))
 
 
-def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode):
+def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode, query_shard=None):
     limits = discovery_limits(max_leads)
     navigation_timeout_ms = max(5000, int(os.environ.get('SCRAPER_NAVIGATION_TIMEOUT_MS', '20000')))
     feed_timeout_ms = max(3000, int(os.environ.get('SCRAPER_FEED_TIMEOUT_MS', '8000')))
@@ -988,6 +995,8 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
     results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
     detail_samples, query_metrics = [], []
     queries, started = generate_query_variations(category, city, state), time.perf_counter()
+    if query_shard:
+        queries = deterministic_query_shard(queries, *query_shard)
     local = {key: 0 for key in ('queries_started', 'queries_completed', 'queries_skipped',
         'candidate_cards_seen', 'candidates_unique', 'candidates_duplicate',
         'candidates_prequalified', 'candidates_rejected_pre_detail', 'details_avoided',
@@ -1278,15 +1287,17 @@ def _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict,
     return results
 
 
-def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict, mode):
+def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict, mode, query_shard=None):
     limits = discovery_limits(max_leads)
     query_budget_seconds = max(15.0, float(os.environ.get('SCRAPER_QUERY_BUDGET_SECONDS', '75')))
     runtime_budget_seconds = max(query_budget_seconds, float(os.environ.get('SCRAPER_RUNTIME_BUDGET_SECONDS', '900')))
     if limits['pipeline_strategy'] == 'microbatch':
-        return _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode)
+        return _scrape_gmaps_microbatch(job_id, category, city, state, max_leads, job_dict, mode, query_shard)
     initialize_discovery_metrics(job_dict, max_leads)
     results, seen_candidates, seen_places, seen_phones = [], set(), set(), set()
     queries = generate_query_variations(category, city, state)
+    if query_shard:
+        queries = deterministic_query_shard(queries, *query_shard)
     started = time.perf_counter()
     low_yield = 0
     detail_page = None
@@ -1619,7 +1630,7 @@ def _scrape_gmaps_incremental(job_id, category, city, state, max_leads, job_dict
     return results
 
 
-def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None, mode='full'):
+def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhook_url=None, job_dict=None, mode='full', query_shard=None):
     _set_job_phase(job_dict, 'scraper_entered', 'Scraper iniciado.')
     print(f"DEBUG: Starting scrape_gmaps with max_leads={max_leads}, webhook_url={webhook_url}", flush=True)
     job_started = time.perf_counter()
@@ -1662,6 +1673,8 @@ def scrape_gmaps(job_id_or_callback, category, city, state, max_leads=10, webhoo
             if job_dict:
                 job_dict['candidate_search_started_at'] = time.time()
             queries_to_run = generate_query_variations(category, city, state) if max_leads > 35 else [f"{category} {city} {state}"]
+            if query_shard:
+                queries_to_run = deterministic_query_shard(queries_to_run, *query_shard)
             place_items = []
             max_pool = max(max_leads * 3, 30)
 

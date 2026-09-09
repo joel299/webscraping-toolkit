@@ -960,10 +960,88 @@ def run_enrich_inline(job_proxy, webhook_url=None):
         job_proxy['log'] = 'Erro na qualificação: ' + str(exc)
         job_proxy.sync()
 
-def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full'):
+def _dedupe_leads_global(leads, limit):
+    """Deterministic, idempotent merge across worker result streams."""
+    seen = set()
+    merged = []
+    for lead in leads:
+        key = gmaps_playwright_scraper.stable_source_key(lead)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(lead)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def multi_worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full', worker_count=2):
+    """Run independent browser processes and aggregate only after all exit."""
+    worker_count = max(1, int(worker_count or 1))
+    oversampling = max(1.0, float(os.environ.get('SCRAPER_OVERSAMPLING_FACTOR', '1.5')))
+    per_worker = max(1, int((max_leads * oversampling + worker_count - 1) // worker_count))
+    root = dict(jobs_dict.get(job_id) or {})
+    root.update({'worker_count': worker_count, 'worker_target': per_worker, 'workers': {}, 'status': 'running', 'phase': 'scrape'})
+    jobs_dict[job_id] = root
+    processes = []
+    for index in range(worker_count):
+        worker_id = f'{job_id}::worker:{index}'
+        worker_job = dict(root, job_id=worker_id, worker_index=index, worker_count=worker_count,
+                          max_leads=per_worker, leads=[], current_count=0, status='pending',
+                          log=f'Worker {index + 1}/{worker_count} aguardando início')
+        jobs_dict[worker_id] = worker_job
+        proc = multiprocessing.Process(target=worker_scrape_process,
+            args=(job_id, category, city, state, per_worker, webhook_url, jobs_dict, mode, index, worker_count, worker_id), daemon=True)
+        processes.append((index, worker_id, proc))
+        proc.start()
+    while True:
+        active = False
+        progress = []
+        for _, worker_id, proc in processes:
+            alive = bool(getattr(proc, 'is_alive', lambda: False)())
+            active = active or alive
+            worker = dict(jobs_dict.get(worker_id) or {})
+            progress.append({'worker_index': worker.get('worker_index'), 'status': worker.get('status'),
+                             'current_count': len(worker.get('leads') or []), 'log': worker.get('log', '')})
+        root = dict(jobs_dict.get(job_id) or root)
+        root['worker_progress'] = progress
+        root['last_activity'] = time.time()
+        jobs_dict[job_id] = root
+        if not active:
+            break
+        time.sleep(0.2)
+    for _, _, proc in processes:
+        proc.join()
+    retries = max(0, int(os.environ.get('SCRAPER_WORKER_RETRIES', '1')))
+    for index, worker_id, proc in processes:
+        worker_state = dict(jobs_dict.get(worker_id) or {})
+        if worker_state.get('status') == 'error' and retries:
+            jobs_dict[worker_id] = dict(worker_state, status='retrying', retry_count=1, log=f'Worker {index + 1} retry isolado')
+            retry = multiprocessing.Process(target=worker_scrape_process,
+                args=(job_id, category, city, state, per_worker, webhook_url, jobs_dict, mode, index, worker_count, worker_id), daemon=True)
+            retry.start(); retry.join()
+    worker_states = [dict(jobs_dict.get(worker_id) or {}) for _, worker_id, _ in processes]
+    all_leads = [lead for worker in worker_states for lead in (worker.get('leads') or [])]
+    merged = _dedupe_leads_global(all_leads, max_leads)
+    root = dict(jobs_dict.get(job_id) or root)
+    root.update({'leads': merged, 'current_count': len(merged), 'target_reached': len(merged) >= max_leads,
+                 'status': 'completed', 'phase': 'scrape', 'last_phase': 'job_completed',
+                 'worker_progress': [{'worker_index': w.get('worker_index'), 'status': w.get('status'),
+                                      'current_count': len(w.get('leads') or []), 'stop_reason': w.get('stop_reason'),
+                                      'retry_count': w.get('retry_count', 0)} for w in worker_states],
+                 'worker_failures': sum(1 for w in worker_states if w.get('status') == 'error'),
+                 'dedupe_count': len(all_leads) - len(merged),
+                 'log': f'Coleta concluída: {len(merged)} leads; workers={worker_count}; duplicatas removidas={len(all_leads)-len(merged)}'})
+    root['payload'] = make_payload(root)
+    jobs_dict[job_id] = root
+
+
+def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full', worker_index=0, worker_count=1, worker_id=None):
     print('[WORKER] job started', flush=True)
-    initial_job = dict(jobs_dict.get(job_id) or {})
-    job_proxy = JobProxy(job_id, jobs_dict, initial_job)
+    worker_id = worker_id or job_id
+    initial_job = dict(jobs_dict.get(worker_id) or jobs_dict.get(job_id) or {})
+    initial_job.update({'worker_index': worker_index, 'worker_count': worker_count, 'status': 'running', 'last_phase': 'worker_started'})
+    job_proxy = JobProxy(worker_id, jobs_dict, initial_job)
     incremental_enabled = bool(getattr(supabase_persistence, 'supabase_enabled', lambda: False)())
     job_proxy['supabase_incremental_enabled'] = incremental_enabled
 
@@ -986,7 +1064,7 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
     job_proxy['last_phase'] = 'worker_started'
     job_proxy['worker_heartbeat_at'] = time.time()
     try:
-        leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy, mode=mode)
+        leads = gmaps_playwright_scraper.scrape_gmaps(job_id, category, city, state, max_leads, None, job_proxy, mode=mode, query_shard=(worker_index, worker_count))
         job_proxy['leads'] = leads or job_proxy.get('leads') or []
         job_proxy['current_count'] = len(job_proxy['leads'])
         try:
@@ -1193,9 +1271,10 @@ class CustomHTTPHandler(SimpleHTTPRequestHandler):
                 return
             auto_enrich = payload.get('auto_enrich', mode == 'full') is True
             webhook_url = payload.get('webhook') or DEFAULT_N8N_WEBHOOK
-            jobs_dict[job_id] = {'job_id': job_id, 'status': 'pending', 'phase': 'scrape', 'mode': mode, 'auto_enrich': auto_enrich, 'category': category, 'city': city, 'state': state, 'max_leads': max_leads, 'webhook': webhook_url, 'current_count': 0, 'leads': [], 'log': 'Aguardando início da coleta...'}
+            jobs_dict[job_id] = {'job_id': job_id, 'status': 'pending', 'phase': 'scrape', 'mode': mode, 'auto_enrich': auto_enrich, 'category': category, 'city': city, 'state': state, 'max_leads': max_leads, 'webhook': webhook_url, 'current_count': 0, 'leads': [], 'worker_count': max(1, min(int(payload.get('worker_count') or os.environ.get('SCRAPER_WORKER_COUNT', '2')), 8)), 'log': 'Aguardando início da coleta...'}
 
-            proc = multiprocessing.Process(target=worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode), daemon=True)
+            worker_count = jobs_dict[job_id]['worker_count']
+            proc = multiprocessing.Process(target=multi_worker_scrape_process, args=(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode, worker_count), daemon=True)
             proc.start()
             print(f'[API] scrape created job={job_id}', flush=True)
             self.send_json({'job_id': job_id, 'status': 'started'})
