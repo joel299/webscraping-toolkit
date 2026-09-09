@@ -14,9 +14,11 @@ from threading import Thread
 try:
     from . import gmaps_playwright_scraper
     from . import supabase_persistence
+    from .supabase_writer import persist_leads_batch
 except ImportError:
     import gmaps_playwright_scraper
     import supabase_persistence
+    from supabase_writer import persist_leads_batch
 
 import multiprocessing
 
