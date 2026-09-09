@@ -84,7 +84,14 @@ def persist_lead(job,w,shard,item):
 def run(job,req,shards):
  ts=[threading.Thread(target=worker,args=(job,req,s["worker_id"],s["shard_id"]),daemon=True) for s in shards]
  for t in ts:t.start()
- for t in ts:t.join()
+ deadline=time.monotonic()+180
+ for t in ts:
+  t.join(max(0,deadline-time.monotonic()))
+ if any(t.is_alive() for t in ts):
+  CANCEL.add(job)
+  patch("/rest/v1/scraper_jobs?id=eq."+job,{"status":"partial","stop_reason":"runtime_budget","updated_at":now()})
+  ev(job,None,"runtime_budget_exceeded",extra={"runtime_budget_seconds":180})
+  return
  try:
   _,events=supa("/rest/v1/scraper_job_events?job_id=eq."+job+"&select=*")
   ids={e.get("place_identity") for e in events if e.get("place_identity")}
