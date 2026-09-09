@@ -976,65 +976,119 @@ def _dedupe_leads_global(leads, limit):
 
 
 def multi_worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full', worker_count=2):
-    """Run independent browser processes and aggregate only after all exit."""
+    """Run independent browsers with streaming parent aggregation and one final webhook."""
     worker_count = max(1, int(worker_count or 1))
     oversampling = max(1.0, float(os.environ.get('SCRAPER_OVERSAMPLING_FACTOR', '1.5')))
     per_worker = max(1, int((max_leads * oversampling + worker_count - 1) // worker_count))
+    stall_limit = max(30.0, float(os.environ.get('SCRAPER_WORKER_STALL_SECONDS', '90')))
     root = dict(jobs_dict.get(job_id) or {})
-    root.update({'worker_count': worker_count, 'worker_target': per_worker, 'workers': {}, 'status': 'running', 'phase': 'scrape'})
+    root.update({'worker_count': worker_count, 'worker_target': per_worker, 'workers': {},
+                 'status': 'running', 'phase': 'scrape', 'worker_progress': [],
+                 'current_count': 0, 'target_reached': False, 'webhook_sent': False})
     jobs_dict[job_id] = root
     processes = []
     for index in range(worker_count):
         worker_id = f'{job_id}::worker:{index}'
-        worker_job = dict(root, job_id=worker_id, worker_index=index, worker_count=worker_count,
+        worker_job = dict(root, job_id=worker_id, worker_index=index,
                           max_leads=per_worker, leads=[], current_count=0, status='pending',
+                          retry_count=0, last_activity=time.time(),
                           log=f'Worker {index + 1}/{worker_count} aguardando início')
         jobs_dict[worker_id] = worker_job
         proc = multiprocessing.Process(target=worker_scrape_process,
-            args=(job_id, category, city, state, per_worker, webhook_url, jobs_dict, mode, index, worker_count, worker_id), daemon=True)
+            args=(job_id, category, city, state, per_worker, webhook_url, jobs_dict,
+                  mode, index, worker_count, worker_id), daemon=True)
         processes.append((index, worker_id, proc))
         proc.start()
+
+    last_counts = {}
+    stalled_since = {}
+    target_reached = False
     while True:
-        active = False
+        now = time.time()
         progress = []
-        for _, worker_id, proc in processes:
-            alive = bool(getattr(proc, 'is_alive', lambda: False)())
-            active = active or alive
+        all_terminal = True
+        all_leads = []
+        for index, worker_id, proc in processes:
             worker = dict(jobs_dict.get(worker_id) or {})
-            progress.append({'worker_index': worker.get('worker_index'), 'status': worker.get('status'),
-                             'current_count': len(worker.get('leads') or []), 'log': worker.get('log', '')})
+            leads = worker.get('leads') or []
+            all_leads.extend(leads)
+            count = len(leads)
+            if count != last_counts.get(worker_id):
+                last_counts[worker_id] = count
+                stalled_since[worker_id] = now
+            elif worker.get('status') in ('running', 'pending'):
+                stalled_since.setdefault(worker_id, now)
+            status = worker.get('status', 'pending')
+            alive = bool(proc.is_alive())
+            if alive and status in ('running', 'pending', 'retrying'):
+                all_terminal = False
+            progress.append({'worker_index': index, 'worker_id': worker_id,
+                             'status': status, 'current_count': count,
+                             'stop_reason': worker.get('stop_reason'),
+                             'retry_count': worker.get('retry_count', 0),
+                             'stall_seconds': round(max(0, now - stalled_since.get(worker_id, now)), 1),
+                             'log': worker.get('log', '')})
+        merged = _dedupe_leads_global(all_leads, max_leads)
         root = dict(jobs_dict.get(job_id) or root)
-        root['worker_progress'] = progress
-        root['last_activity'] = time.time()
+        root.update({'leads': merged, 'current_count': len(merged),
+                     'target_reached': len(merged) >= max_leads,
+                     'worker_progress': progress, 'worker_failures': sum(1 for p in progress if p['status'] == 'error'),
+                     'dedupe_count': len(all_leads) - len(merged), 'last_activity': now,
+                     'last_phase': 'aggregating_workers'})
         jobs_dict[job_id] = root
-        if not active:
+        if len(merged) >= max_leads:
+            target_reached = True
+            for _, _, proc in processes:
+                if proc.is_alive():
+                    proc.terminate()
             break
-        time.sleep(0.2)
+        if all_terminal:
+            break
+        time.sleep(0.5)
+
     for _, _, proc in processes:
-        proc.join()
-    retries = max(0, int(os.environ.get('SCRAPER_WORKER_RETRIES', '1')))
-    for index, worker_id, proc in processes:
-        worker_state = dict(jobs_dict.get(worker_id) or {})
-        if worker_state.get('status') == 'error' and retries:
-            jobs_dict[worker_id] = dict(worker_state, status='retrying', retry_count=1, log=f'Worker {index + 1} retry isolado')
-            retry = multiprocessing.Process(target=worker_scrape_process,
-                args=(job_id, category, city, state, per_worker, webhook_url, jobs_dict, mode, index, worker_count, worker_id), daemon=True)
-            retry.start(); retry.join()
+        proc.join(timeout=10)
+        if proc.is_alive():
+            proc.terminate(); proc.join(timeout=5)
+
     worker_states = [dict(jobs_dict.get(worker_id) or {}) for _, worker_id, _ in processes]
     all_leads = [lead for worker in worker_states for lead in (worker.get('leads') or [])]
     merged = _dedupe_leads_global(all_leads, max_leads)
+    if len(merged) >= max_leads:
+        status, stop_reason = 'completed', 'target_reached'
+    elif any(w.get('status') == 'error' for w in worker_states):
+        status, stop_reason = 'partial', 'worker_error'
+    elif any(w.get('stop_reason') == 'blocked_by_google' for w in worker_states):
+        status, stop_reason = 'partial', 'blocked_by_google'
+    elif all((w.get('stop_reason') in ('source_exhausted', 'queries_exhausted', 'target_reached')
+              or w.get('status') in ('completed', 'error')) for w in worker_states):
+        status, stop_reason = 'completed', 'source_exhausted'
+    else:
+        status, stop_reason = 'partial', 'runtime_budget'
     root = dict(jobs_dict.get(job_id) or root)
-    root.update({'leads': merged, 'current_count': len(merged), 'target_reached': len(merged) >= max_leads,
-                 'status': 'completed', 'phase': 'scrape', 'last_phase': 'job_completed',
-                 'worker_progress': [{'worker_index': w.get('worker_index'), 'status': w.get('status'),
-                                      'current_count': len(w.get('leads') or []), 'stop_reason': w.get('stop_reason'),
-                                      'retry_count': w.get('retry_count', 0)} for w in worker_states],
+    root.update({'leads': merged, 'current_count': len(merged), 'target_reached': stop_reason == 'target_reached',
+                 'status': status, 'stop_reason': stop_reason, 'phase': 'scrape',
+                 'last_phase': 'job_completed',
+                 'worker_progress': [{'worker_index': w.get('worker_index'), 'worker_id': w.get('job_id'),
+                                      'status': w.get('status'), 'current_count': len(w.get('leads') or []),
+                                      'stop_reason': w.get('stop_reason'), 'retry_count': w.get('retry_count', 0)}
+                                     for w in worker_states],
                  'worker_failures': sum(1 for w in worker_states if w.get('status') == 'error'),
                  'dedupe_count': len(all_leads) - len(merged),
-                 'log': f'Coleta concluída: {len(merged)} leads; workers={worker_count}; duplicatas removidas={len(all_leads)-len(merged)}'})
+                 'stop_details': {'target': max_leads, 'captured': len(merged),
+                                  'workers': worker_count, 'dedupe_count': len(all_leads) - len(merged)},
+                 'log': (f'Coleta concluída: {len(merged)}/{max_leads} leads; stop_reason={stop_reason}; '
+                         f'workers={worker_count}; duplicatas removidas={len(all_leads)-len(merged)}')})
     root['payload'] = make_payload(root)
+    # Only the parent can emit the final webhook, and only once.
+    target = webhook_url or root.get('webhook') or DEFAULT_N8N_WEBHOOK
+    if root['payload'].get('leads') and target:
+        response = _send_webhook_once(root, root['payload'], target)
+        root['webhook_sent'] = bool(response.get('ok'))
+        root['sent_to_webhook'] = bool(response.get('ok'))
+    else:
+        root['n8n_response'] = {'ok': False, 'error': 'webhook não configurado ou payload sem leads'}
     jobs_dict[job_id] = root
-
 
 def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url, jobs_dict, mode='full', worker_index=0, worker_count=1, worker_id=None):
     print('[WORKER] job started', flush=True)
@@ -1106,13 +1160,13 @@ def worker_scrape_process(job_id, category, city, state, max_leads, webhook_url,
         if mode == 'fast':
             final_payload = make_payload(job_proxy)
             job_proxy['payload'] = final_payload
-            webhook_target = webhook_url or job_proxy.get('webhook') or DEFAULT_N8N_WEBHOOK
-            if final_payload.get('leads') and webhook_target:
+            if worker_count <= 1 and final_payload.get('leads'):
+                webhook_target = webhook_url or job_proxy.get('webhook') or DEFAULT_N8N_WEBHOOK
                 response = _send_webhook_once(job_proxy, final_payload, webhook_target)
                 job_proxy['sent_to_webhook'] = bool(response.get('ok'))
                 job_proxy['log'] = 'Coleta concluída e leads enviados para automação.' if response.get('ok') else 'Coleta concluída, mas o envio para automação falhou.'
             else:
-                job_proxy['n8n_response'] = {'ok': False, 'error': 'webhook não configurado ou payload sem leads'}
+                job_proxy['n8n_response'] = {'ok': False, 'deferred_to_parent': True}
                 job_proxy['webhook_sent'] = False
             if job_proxy.get('job_started_at'):
                 job_proxy['total_pipeline_ms'] = round((time.time() - job_proxy['job_started_at']) * 1000, 2)
