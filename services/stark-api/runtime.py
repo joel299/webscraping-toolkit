@@ -29,17 +29,18 @@ def worker(job,req,w,shard):
   pid=None
   try:
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"status":"running","started_at":now(),"retry_count":attempt})
-   _,c=remote(base,"/api/v1/jobs","POST",{"name":"V2 "+job+" "+w,"keywords":[query],"lang":"pt","zoom":15,"depth":1,"max_time":300}); pid=c["id"]
+   _,c=remote(base,"/api/v1/jobs","POST",{"name":"V2 "+job+" "+w,"keywords":[query],"lang":"pt","zoom":15,"depth":1,"max_time":120}); pid=c["id"]
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"provider_job_id":pid,"query_set":[query]})
-   for _ in range(120):
+   for tick in range(50):
     if job in CANCEL:
      if pid: remote(base,"/api/v1/jobs/"+pid,"DELETE")
      raise RuntimeError("cancelled")
-    _,j=remote(base,"/api/v1/jobs/"+pid); st=str(j.get("Status","")).lower()
+    _,j=remote(base,"/api/v1/jobs/"+pid); st=str(j.get("Status","")).lower(); patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"heartbeat_at":now(),"provider_status":st})
     if st=="ok": break
     if st in ("failed","error"): raise RuntimeError(st)
     time.sleep(3)
-   raw=urllib.request.urlopen(base+"/api/v1/jobs/"+pid+"/download",timeout=90).read().decode(errors="replace")
+   else: raise RuntimeError("provider_timeout")
+   raw=urllib.request.urlopen(base+"/api/v1/jobs/"+pid+"/download",timeout=45).read().decode(errors="replace")
    rows=list(csv.DictReader(io.StringIO(raw)))
    for x in rows:
     item=normalize_place(x,req)
