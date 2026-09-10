@@ -90,7 +90,7 @@ def persist_lead(job,w,shard,item):
 def run(job,req,shards):
  ts=[threading.Thread(target=worker,args=(job,req,s["worker_id"],s["shard_id"]),daemon=True) for s in shards]
  for t in ts:t.start()
- deadline=time.monotonic()+240
+ deadline=time.monotonic()+420
  for t in ts:
   t.join(max(0,deadline-time.monotonic()))
  if any(t.is_alive() for t in ts):
