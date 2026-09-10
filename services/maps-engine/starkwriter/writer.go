@@ -116,11 +116,12 @@ func (w *Writer) accept(r scrapemate.Result, value any) {
 	}
 }
 func (w *Writer) enqueue(job scrapemate.IJob, e *gmaps.Entry) {
-	pid := w.jobID
-	if job != nil && job.GetID() != "" {
-		pid = job.GetID()
+	providerJobID := w.jobID
+	queryJobID := ""
+	if job != nil {
+		queryJobID = job.GetID()
 	}
-	body, _ := json.Marshal(map[string]any{"provider_job_id": pid, "entry": e, "emitted_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	body, _ := json.Marshal(map[string]any{"provider_job_id": providerJobID, "query_job_id": queryJobID, "entry": e, "emitted_at": time.Now().UTC().Format(time.RFC3339Nano)})
 	go w.deliver(body)
 }
 func (w *Writer) deliver(body []byte) {

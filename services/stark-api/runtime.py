@@ -124,7 +124,6 @@ def ingest_stream(provider_id, raw):
     if not jobs: return 404, {"error":"unknown_parent_job"}
     raw=dict(raw or {})
     if raw.get("web_site") and not raw.get("website"): raw["website"]=raw["web_site"]
-    if raw.get("input_id") and not raw.get("place_id"): raw["place_id"]=raw["input_id"]
     req={"requested_category":jobs[0].get("requested_category"),"city":jobs[0].get("city"),"state":jobs[0].get("state")}
     item=normalize_place(raw,req); ident_value=item["place_identity"]
     with ACCEPTED_LOCK:
