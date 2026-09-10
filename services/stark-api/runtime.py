@@ -32,7 +32,7 @@ def worker(job,req,w,shard):
   pid=None
   try:
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"status":"running","started_at":now(),"retry_count":attempt})
-   _,c=remote(base,"/api/v1/jobs","POST",{"name":"V2 "+job+" "+w,"keywords":queries,"lang":"pt","zoom":15,"depth":3,"max_time":120}); pid=c["id"]
+   _,c=remote(base,"/api/v1/jobs","POST",{"name":"V2 "+job+" "+w,"keywords":queries,"lang":"pt","zoom":15,"depth":3,"max_time":600}); pid=c["id"]
    patch("/rest/v1/scraper_job_shards?shard_id=eq."+shard,{"provider_job_id":pid,"query_set":[query]})
    for tick in range(70):
     if job in CANCEL:
