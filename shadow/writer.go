@@ -61,6 +61,7 @@ type SearchContext struct {
 	Location       string `json:"location"`
 	Category       string `json:"category"`
 	RequestedLimit int    `json:"requested_limit"`
+	Status         string `json:"status"`
 }
 
 type Metrics struct {
@@ -69,6 +70,7 @@ type Metrics struct {
 	Unchanged                uint64 `json:"unchanged"`
 	Failed                   uint64 `json:"failed"`
 	SearchesCreated          uint64 `json:"searches_created"`
+	SearchesUpdated          uint64 `json:"searches_updated"`
 	SearchLeadLinksInserted  uint64 `json:"search_lead_links_inserted"`
 	SearchLeadLinksUnchanged uint64 `json:"search_lead_links_unchanged"`
 	ProvenanceFailed         uint64 `json:"provenance_failed"`
@@ -85,6 +87,19 @@ type Writer struct {
 	validator    *ProspectLeadValidator
 	jobID        string
 	jobName      string
+}
+
+type UpsertOutcome string
+
+const (
+	OutcomeInserted  UpsertOutcome = "inserted"
+	OutcomeUpdated   UpsertOutcome = "updated"
+	OutcomeUnchanged UpsertOutcome = "unchanged"
+)
+
+type UpsertLeadResult struct {
+	CanonicalPlaceID string
+	Outcome          UpsertOutcome
 }
 
 // SetJobContext sets the search/job provenance context for results written by this Writer instance.
@@ -114,6 +129,7 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 
 	config.MaxConns = 10
 	config.MinConns = 2
+	config.MaxConnIdleTime = 5 * time.Minute
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -181,23 +197,43 @@ func (w *Writer) GetMetrics() Metrics {
 		Unchanged:                atomic.LoadUint64(&w.metrics.Unchanged),
 		Failed:                   atomic.LoadUint64(&w.metrics.Failed),
 		SearchesCreated:          atomic.LoadUint64(&w.metrics.SearchesCreated),
+		SearchesUpdated:          atomic.LoadUint64(&w.metrics.SearchesUpdated),
 		SearchLeadLinksInserted:  atomic.LoadUint64(&w.metrics.SearchLeadLinksInserted),
 		SearchLeadLinksUnchanged: atomic.LoadUint64(&w.metrics.SearchLeadLinksUnchanged),
 		ProvenanceFailed:         atomic.LoadUint64(&w.metrics.ProvenanceFailed),
 	}
 }
 
-// RegisterSearch registers or updates a search in public.prospect_searches (FASE 6)
+// RegisterSearch registers or updates a search in public.prospect_searches (GATE 7 & GATE 8)
 func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 	if s == nil || w.pool == nil || w.disabled {
 		return nil
+	}
+
+	status := strings.ToLower(strings.TrimSpace(s.Status))
+	if status == "" {
+		status = "running"
+	}
+
+	validStatuses := map[string]bool{
+		"created":   true,
+		"running":   true,
+		"completed": true,
+		"failed":    true,
+	}
+
+	if !validStatuses[status] {
+		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+		err := fmt.Errorf("invalid search status: %s", status)
+		log.Warn("shadow persistence register search invalid status", "status", status, "search_id", s.SearchID)
+		return err
 	}
 
 	q := `
 	INSERT INTO public.prospect_searches (
 		search_id, job_id, job_name, query, location, category, requested_limit, status, started_at, updated_at
 	) VALUES (
-		$1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW()
+		$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
 	)
 	ON CONFLICT (search_id) DO UPDATE SET
 		job_id = EXCLUDED.job_id,
@@ -206,11 +242,13 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 		location = EXCLUDED.location,
 		category = EXCLUDED.category,
 		requested_limit = EXCLUDED.requested_limit,
-		status = 'running',
+		status = EXCLUDED.status,
 		updated_at = NOW()
+	RETURNING (xmax::text = '0') AS is_insert;
 	`
 
-	_, err := w.pool.Exec(ctx, q,
+	var isInsert bool
+	err := w.pool.QueryRow(ctx, q,
 		s.SearchID,
 		s.JobID,
 		s.JobName,
@@ -218,7 +256,8 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 		s.Location,
 		s.Category,
 		s.RequestedLimit,
-	)
+		status,
+	).Scan(&isInsert)
 
 	if err != nil {
 		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
@@ -226,14 +265,33 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 		return err
 	}
 
-	atomic.AddUint64(&w.metrics.SearchesCreated, 1)
+	if isInsert {
+		atomic.AddUint64(&w.metrics.SearchesCreated, 1)
+	} else {
+		atomic.AddUint64(&w.metrics.SearchesUpdated, 1)
+	}
 	return nil
 }
 
-// UpdateSearchStatus updates status and completion time in public.prospect_searches (FASE 9)
+// UpdateSearchStatus updates status and completion time in public.prospect_searches (GATE 7)
 func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMsg string) error {
 	if searchID == "" || w.pool == nil || w.disabled {
 		return nil
+	}
+
+	status = strings.ToLower(strings.TrimSpace(status))
+	validStatuses := map[string]bool{
+		"created":   true,
+		"running":   true,
+		"completed": true,
+		"failed":    true,
+	}
+
+	if !validStatuses[status] {
+		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+		err := fmt.Errorf("invalid search status: %s", status)
+		log.Warn("shadow persistence update search status invalid status", "status", status, "search_id", searchID)
+		return err
 	}
 
 	var completedAt *time.Time
@@ -358,7 +416,8 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 	defer cancel()
 
 	for _, entry := range entries {
-		err := w.upsertLeadWithContext(saveCtx, entry, "", "")
+		res, err := w.upsertLeadWithContext(saveCtx, entry, "", "")
+		_ = res
 		if err != nil {
 			atomic.AddUint64(&w.metrics.Failed, 1)
 			log.Warn("shadow persistence upsert failed gracefully", "place", entry.Title, "error", err)
@@ -497,7 +556,7 @@ func (w *Writer) updateExistingLead(ctx context.Context, canonicalPlaceID string
 	return nil
 }
 
-func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) error {
+func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) (string, error) {
 	q := `
 	INSERT INTO public.prospect_leads_google (
 		place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country,
@@ -538,35 +597,37 @@ func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) error {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			// Concurrency / unique violation recovery (PASSO 3):
+			// Concurrency / unique violation recovery (GATE 3):
 			// Locate existing canonical record and update it instead of failing
 			existingID, resErr := w.ResolveIdentity(ctx, lead)
 			if resErr == nil && existingID != "" {
-				return w.updateExistingLead(ctx, existingID, lead)
+				updateErr := w.updateExistingLead(ctx, existingID, lead)
+				return existingID, updateErr
 			}
 		}
-		return err
+		return lead.PlaceID, err
 	}
 
 	atomic.AddUint64(&w.metrics.Inserted, 1)
-	return nil
+	return lead.PlaceID, nil
 }
 
 func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
-	return w.upsertLeadWithContext(ctx, entry, "", "")
+	_, err := w.upsertLeadWithContext(ctx, entry, "", "")
+	return err
 }
 
-func (w *Writer) UpsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) error {
+func (w *Writer) UpsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) (*UpsertLeadResult, error) {
 	return w.upsertLeadWithContext(ctx, entry, jobID, jobName)
 }
 
-func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
+func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) (*UpsertLeadResult, error) {
 	return w.upsertLeadWithContext(ctx, entry, "", "")
 }
 
-func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) error {
+func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) (*UpsertLeadResult, error) {
 	if entry == nil {
-		return nil
+		return nil, nil
 	}
 
 	w.mu.Lock()
@@ -580,35 +641,50 @@ func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, 
 
 	lead := w.mapper.MapToProspectLead(entry, jobID, jobName)
 	if err := w.validator.Validate(lead); err != nil {
-		return err
+		return nil, err
 	}
 
 	// 1. Resolve identity across place_id, cid, and whatsapp
 	existingID, err := w.ResolveIdentity(ctx, lead)
 	if err != nil {
-		return err
+		atomic.AddUint64(&w.metrics.Failed, 1)
+		return nil, err
 	}
 
-	canonicalPlaceID := existingID
-	if canonicalPlaceID != "" {
+	var canonicalPlaceID string
+	var outcome UpsertOutcome
+
+	if existingID != "" {
 		// Existing canonical lead found: UPDATE without mutating place_id or SDR fields
+		canonicalPlaceID = existingID
 		err = w.updateExistingLead(ctx, canonicalPlaceID, lead)
+		outcome = OutcomeUpdated
 	} else {
-		// Fresh lead: INSERT
-		canonicalPlaceID = lead.PlaceID
-		err = w.insertLead(ctx, lead)
+		// Fresh lead: INSERT (recovers to update if race condition occurs on CID/WhatsApp)
+		canonicalPlaceID, err = w.insertLead(ctx, lead)
+		if canonicalPlaceID != lead.PlaceID {
+			outcome = OutcomeUpdated
+		} else {
+			outcome = OutcomeInserted
+		}
 	}
 
 	if err != nil {
-		return err
+		atomic.AddUint64(&w.metrics.Failed, 1)
+		return nil, err
 	}
 
-	// 2. Link lead to search if job_id (search_id) is present (GATE 1 Provenance)
-	if lead.JobID != "" {
-		_ = w.LinkLeadToSearch(ctx, lead.JobID, canonicalPlaceID, 0)
+	// 2. Link lead to search using CANONICAL place ID ONLY (GATE 3 Fix)
+	if lead.JobID != "" && canonicalPlaceID != "" {
+		if linkErr := w.LinkLeadToSearch(ctx, lead.JobID, canonicalPlaceID, 0); linkErr != nil {
+			log.Warn("shadow persistence link lead to search failed", "search_id", lead.JobID, "canonical_place_id", canonicalPlaceID, "error", linkErr)
+		}
 	}
 
-	return nil
+	return &UpsertLeadResult{
+		CanonicalPlaceID: canonicalPlaceID,
+		Outcome:          outcome,
+	}, nil
 }
 
 // FindCompletedSearch searches for an existing completed search matching query and optional location.

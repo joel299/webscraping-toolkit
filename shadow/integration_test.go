@@ -454,7 +454,8 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 		Category: "Hamburgueria",
 		Phone:    "+55 (67) 99111-1111",
 	}
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName))
+	_, err = writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName)
+	require.NoError(t, err)
 
 	var (
 		countSearchesA   int
@@ -497,7 +498,8 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 			Category: "Hamburgueria",
 			Phone:    fmt.Sprintf("+55 (67) 99222-%04d", i),
 		}
-		require.NoError(t, writer.UpsertLeadWithContext(ctx, entry, searchB.SearchID, searchB.JobName))
+		_, err := writer.UpsertLeadWithContext(ctx, entry, searchB.SearchID, searchB.JobName)
+		require.NoError(t, err)
 	}
 
 	var countLinksB int
@@ -522,7 +524,8 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 			Category: "Hamburgueria",
 			Phone:    fmt.Sprintf("+55 (67) 99333-%04d", i),
 		}
-		require.NoError(t, writer.UpsertLeadWithContext(ctx, entry, searchC.SearchID, searchC.JobName))
+		_, err := writer.UpsertLeadWithContext(ctx, entry, searchC.SearchID, searchC.JobName)
+		require.NoError(t, err)
 	}
 
 	var countLinksC int
@@ -530,7 +533,8 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 	assert.Equal(t, 20, countLinksC, "TEST C: search-003 must link exactly 20 leads in prospect_search_leads")
 
 	// --- TEST D: Same Search + Same Lead Twice ---
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName))
+	_, err = writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName)
+	require.NoError(t, err)
 	var countLinksADupe int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-001' AND place_id = 'place-001'").Scan(&countLinksADupe))
 	assert.Equal(t, 1, countLinksADupe, "TEST D: Duplicate lead in same search must result in exactly 1 relationship link (zero duplicate links)")
@@ -543,8 +547,10 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 		Category: "Restaurante",
 		Phone:    "+55 (67) 99444-4444",
 	}
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, leadX, searchA.SearchID, searchA.JobName))
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, leadX, searchB.SearchID, searchB.JobName))
+	_, err = writer.UpsertLeadWithContext(ctx, leadX, searchA.SearchID, searchA.JobName)
+	require.NoError(t, err)
+	_, err = writer.UpsertLeadWithContext(ctx, leadX, searchB.SearchID, searchB.JobName)
+	require.NoError(t, err)
 
 	var (
 		countCanonicalX int
@@ -569,7 +575,8 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 	// Scrape Lead X again under Search C
 	leadXEnriched := *leadX
 	leadXEnriched.ReviewRating = 4.9
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, &leadXEnriched, searchC.SearchID, searchC.JobName))
+	_, err = writer.UpsertLeadWithContext(ctx, &leadXEnriched, searchC.SearchID, searchC.JobName)
+	require.NoError(t, err)
 
 	var (
 		statusX          string
@@ -591,6 +598,74 @@ func TestSearchToLeadProvenanceScenarios(t *testing.T) {
 	assert.True(t, convX, "TEST F: converted preserved across searches")
 	assert.Equal(t, 4.9, ratingX, "TEST F: review_rating enriched across searches")
 	assert.Equal(t, 3, countLinksXAfter, "TEST F: Lead X now has 3 provenance links (search-001, search-002, search-003)")
+
+	// --- TEST G: CID Collision Canonical Place ID Provenance (GATE 3) ---
+	searchCID_A := &SearchContext{SearchID: "search-cid-A", JobID: "job-cid-A", JobName: "CID Test A", Query: "CID Test", Status: "running"}
+	require.NoError(t, writer.RegisterSearch(ctx, searchCID_A))
+
+	leadCID_AAA := &gmaps.Entry{ID: "place-AAA", Title: "Store AAA", Cid: "CID-999", Phone: "67990000001"}
+	resA, errA := writer.UpsertLeadWithContext(ctx, leadCID_AAA, searchCID_A.SearchID, searchCID_A.JobName)
+	require.NoError(t, errA)
+	assert.Equal(t, "place-AAA", resA.CanonicalPlaceID)
+
+	searchCID_B := &SearchContext{SearchID: "search-cid-B", JobID: "job-cid-B", JobName: "CID Test B", Query: "CID Test", Status: "running"}
+	require.NoError(t, writer.RegisterSearch(ctx, searchCID_B))
+
+	// Lead BBB has DIFFERENT input_id (place-BBB), but SAME CID (CID-999)
+	leadCID_BBB := &gmaps.Entry{ID: "place-BBB", Title: "Store AAA Enriched", Cid: "CID-999", Phone: "67990000001"}
+	resB, errB := writer.UpsertLeadWithContext(ctx, leadCID_BBB, searchCID_B.SearchID, searchCID_B.JobName)
+	require.NoError(t, errB)
+	assert.Equal(t, "place-AAA", resB.CanonicalPlaceID, "GATE 3: CanonicalPlaceID must be place-AAA, NOT place-BBB")
+
+	var countCanonicalCID, countLinksCID_A, countLinksCID_B, countLinksBBB int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google WHERE cid = 'CID-999'").Scan(&countCanonicalCID))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-cid-A' AND place_id = 'place-AAA'").Scan(&countLinksCID_A))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-cid-B' AND place_id = 'place-AAA'").Scan(&countLinksCID_B))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE place_id = 'place-BBB'").Scan(&countLinksBBB))
+
+	assert.Equal(t, 1, countCanonicalCID, "GATE 3: Exactly 1 canonical lead for CID-999")
+	assert.Equal(t, 1, countLinksCID_A, "GATE 3: Search A linked to canonical place-AAA")
+	assert.Equal(t, 1, countLinksCID_B, "GATE 3: Search B linked to canonical place-AAA")
+	assert.Equal(t, 0, countLinksBBB, "GATE 3: No provenance links to non-existent place-BBB")
+
+	// --- TEST H: WhatsApp Collision Canonical Place ID Provenance (GATE 3) ---
+	searchWA_A := &SearchContext{SearchID: "search-wa-A", JobID: "job-wa-A", JobName: "WA Test A", Query: "WA Test", Status: "running"}
+	require.NoError(t, writer.RegisterSearch(ctx, searchWA_A))
+
+	leadWA_111 := &gmaps.Entry{ID: "place-111", Title: "Dentist 111", Phone: "+55 67 98888-7777"}
+	resWA_A, errWA_A := writer.UpsertLeadWithContext(ctx, leadWA_111, searchWA_A.SearchID, searchWA_A.JobName)
+	require.NoError(t, errWA_A)
+	assert.Equal(t, "place-111", resWA_A.CanonicalPlaceID)
+
+	searchWA_B := &SearchContext{SearchID: "search-wa-B", JobID: "job-wa-B", JobName: "WA Test B", Query: "WA Test", Status: "running"}
+	require.NoError(t, writer.RegisterSearch(ctx, searchWA_B))
+
+	// Lead 222 has DIFFERENT place_id, but SAME normalized WhatsApp (5567988887777)
+	leadWA_222 := &gmaps.Entry{ID: "place-222", Title: "Dentist 111 Clinic", Phone: "5567988887777"}
+	resWA_B, errWA_B := writer.UpsertLeadWithContext(ctx, leadWA_222, searchWA_B.SearchID, searchWA_B.JobName)
+	require.NoError(t, errWA_B)
+	assert.Equal(t, "place-111", resWA_B.CanonicalPlaceID, "GATE 3: CanonicalPlaceID must be place-111, NOT place-222")
+
+	var countCanonicalWA, countLinksWA_A, countLinksWA_B, countLinks222 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google WHERE whatsapp = '5567988887777'").Scan(&countCanonicalWA))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-wa-A' AND place_id = 'place-111'").Scan(&countLinksWA_A))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-wa-B' AND place_id = 'place-111'").Scan(&countLinksWA_B))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE place_id = 'place-222'").Scan(&countLinks222))
+
+	assert.Equal(t, 1, countCanonicalWA, "GATE 3: Exactly 1 canonical lead for WhatsApp 5567988887777")
+	assert.Equal(t, 1, countLinksWA_A, "GATE 3: Search WA_A linked to canonical place-111")
+	assert.Equal(t, 1, countLinksWA_B, "GATE 3: Search WA_B linked to canonical place-111")
+	assert.Equal(t, 0, countLinks222, "GATE 3: No provenance links to non-existent place-222")
+
+	// --- TEST I: Invalid Status Validation & Provenance Error Handling (GATE 4 & GATE 7) ---
+	errInvalidReg := writer.RegisterSearch(ctx, &SearchContext{SearchID: "search-invalid", Status: "INVALID_STATUS"})
+	assert.Error(t, errInvalidReg, "RegisterSearch must reject invalid status")
+
+	errInvalidUpd := writer.UpdateSearchStatus(ctx, "search-001", "INVALID_STATUS", "")
+	assert.Error(t, errInvalidUpd, "UpdateSearchStatus must reject invalid status")
+
+	metricsFinal := writer.GetMetrics()
+	assert.GreaterOrEqual(t, metricsFinal.ProvenanceFailed, uint64(2), "ProvenanceFailed metric must increment on invalid status errors")
 }
 
 func TestShadowFallbackMode(t *testing.T) {
@@ -661,9 +736,12 @@ func TestDatabaseFirstReadPathScenarios(t *testing.T) {
 	lead2 := &gmaps.Entry{Title: "Pizza Express", Category: "Pizzaria", Address: "Rua B 2", Phone: "67992222222", Latitude: -20.46, Longtitude: -54.61, Link: "https://maps.google.com/?cid=102"}
 	lead3 := &gmaps.Entry{Title: "Pizza Italia", Category: "Pizzaria", Address: "Rua C 3", Phone: "67993333333", Latitude: -20.47, Longtitude: -54.62, Link: "https://maps.google.com/?cid=103"}
 
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, search1.SearchID, search1.JobName))
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead2, search1.SearchID, search1.JobName))
-	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead3, search1.SearchID, search1.JobName))
+	_, err = writer.UpsertLeadWithContext(ctx, lead1, search1.SearchID, search1.JobName)
+	require.NoError(t, err)
+	_, err = writer.UpsertLeadWithContext(ctx, lead2, search1.SearchID, search1.JobName)
+	require.NoError(t, err)
+	_, err = writer.UpsertLeadWithContext(ctx, lead3, search1.SearchID, search1.JobName)
+	require.NoError(t, err)
 	require.NoError(t, writer.UpdateSearchStatus(ctx, search1.SearchID, "completed", ""))
 
 	// 3. Test FindCompletedSearch: Exact Query Match

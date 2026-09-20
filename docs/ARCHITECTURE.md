@@ -21,13 +21,15 @@ UI (Scrape Request)
 
 ## Key Architectural Principles
 
-1. **Database-First Read Path (GATE 2)**: Before launching a new Playwright scraper, the system queries `public.prospect_searches` for an existing completed search matching `(query, location)`. If a match with leads is found, results are served immediately from PostgreSQL in under 100ms.
-2. **Search to Lead Provenance (GATE 1)**: Every search request creates a `prospect_searches` record (`search_id`, `job_id`, `query`, `location`, `requested_limit`, `status`, `started_at`, `completed_at`). Every lead saved creates a relation in `prospect_search_leads` linking `search_id` to `place_id`.
-3. **Incremental Shadow Persistence**: Leads and their search provenance links are mapped, validated, and flushed in batches during scraping without waiting for the job to complete.
-4. **Shadow Mode Resiliency**: Database connection errors or network timeouts log sanitized alerts without exposing DSN secrets and DO NOT interrupt scraping, HTMX UI, Leaflet map, or CSV export.
-5. **Runtime DDL Elimination**: Migrations (`supabase/migrations/*.sql`) are the sole Source of Truth for database schemas. The application runtime writer only validates schema existence without executing DDL.
-6. **Single Canonical Lead Table**: Persistence is concentrated exclusively on `public.prospect_leads_google` as the canonical store, with `public.prospect_search_leads` holding the provenance relationship.
-7. **Non-Destructive UPSERT**: Re-scraping an existing lead updates basic information while strictly preserving existing commercial SDR fields (`lead_status`, `pipeline_stage`, etc.) and existing non-empty enrichment attributes.
-8. **Isolated Parallel Execution**: GRU-84 baseline remains untouched on port `:8080`, while GRU-86 / GRU-88 operates in parallel on port `:8086`.
+1. **Feature Flag Scoping (`PROSPECT_READ_MODE`)**: Server-side configuration controlling DB read-path interception. Default `current` forces full execution via Gosom scraper -> shadow persistence -> provenance. Setting `database` enables DB-first cache read path.
+2. **Partial Result Guard (GATE 2)**: Database-first cache HIT is strictly denied if `available_leads < requested_limit`, forcing a fresh scrape to obtain the full requested depth.
+3. **Canonical Place ID Identity Linking (GATE 3)**: Lead identity resolution (place_id -> cid -> whatsapp) returns the exact `CanonicalPlaceID` created/updated in `public.prospect_leads_google`, ensuring `LinkLeadToSearch` links only valid canonical IDs.
+4. **Search to Lead Provenance**: Every search request creates a `prospect_searches` record (`search_id`, `job_id`, `query`, `location`, `requested_limit`, `status`, `started_at`, `completed_at`). Every lead saved creates a relation in `prospect_search_leads` linking `search_id` to `canonical_place_id`.
+5. **Incremental Shadow Persistence**: Leads and their search provenance links are mapped, validated, and flushed in batches during scraping without waiting for the job to complete.
+6. **Shadow Mode Resiliency & Metric Error Tracking (GATE 4)**: Provenance link failures record sanitized log events and increment `ProvenanceFailed` without breaking scraper or UI.
+7. **Runtime DDL Elimination**: Migrations (`supabase/migrations/*.sql`) are the sole Source of Truth for database schemas. The application runtime writer only validates schema existence without executing DDL.
+8. **Single Canonical Lead Table**: Persistence is concentrated exclusively on `public.prospect_leads_google` as the canonical store, with `public.prospect_search_leads` holding the provenance relationship.
+9. **Non-Destructive UPSERT**: Re-scraping an existing lead updates basic information while strictly preserving existing commercial SDR fields (`lead_status`, `pipeline_stage`, etc.) and existing non-empty enrichment attributes.
+10. **Isolated Parallel Execution**: GRU-84 baseline remains untouched on port `:8080`, while GRU-88 operates in parallel on port `:8086`.
 
 

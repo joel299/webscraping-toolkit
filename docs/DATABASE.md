@@ -37,10 +37,11 @@ When a lead is re-scraped, existing non-empty values for `website`, `phone`, `wh
 1. `supabase/migrations/20260920153500_prospect_leads_google_persistence.sql`: Idempotent schema, columns, and partial unique indexes.
 2. `supabase/migrations/20260920161000_prospect_leads_google_rls.sql`: Row Level Security enabled, `anon`/`authenticated` direct access revoked.
 3. `supabase/migrations/20260920190000_prospect_searches_provenance.sql`: Created `public.prospect_searches` and `public.prospect_search_leads` schemas, constraints, FKs, and indexes.
-4. `supabase/migrations/20260920191000_prospect_searches_rls.sql`: Row Level Security enabled on both new tables, `anon`/`authenticated` direct access revoked, least-privilege `SELECT, INSERT, UPDATE, DELETE` granted to backend roles.
+4. `supabase/migrations/20260920191000_prospect_searches_rls.sql`: Row Level Security enabled on both new tables.
+5. `supabase/migrations/20260920193000_prospect_searches_hardening.sql`: Explicitly revoked `authenticated` role permissions on `prospect_searches` and `prospect_search_leads`, enforced status `CHECK` constraint (`created`, `running`, `completed`, `failed`), and implemented strict least privilege by revoking `DELETE` permissions (granting `SELECT, INSERT, UPDATE` only).
 
 ## Row Level Security (RLS) & Least Privilege
 - RLS Status: Enabled on all tables (`relrowsecurity = true`, `relforcerowsecurity = true`).
-- Direct client access: `anon` and `authenticated` roles are **REVOKED** (`DENIED`).
-- Backend writer access: Least-privilege granted to `postgres` and `service_role`. No public client access exposed via Supabase.
+- Direct client access: `anon` and `authenticated` roles are explicitly **REVOKED** (`DENIED`).
+- Backend writer access: Least-privilege (`SELECT, INSERT, UPDATE`) granted to `postgres` and `service_role` (`DELETE` revoked). No public client access exposed via Supabase.
 

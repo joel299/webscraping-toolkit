@@ -18,18 +18,21 @@
   - Verifies Non-Destructive Enrichment Protection.
   - Verifies `Unchanged` metric increment (+1) when identical lead is re-scraped without modification.
 - `TestSearchToLeadProvenanceScenarios`:
-  - Applies real migration files (`20260920190000_prospect_searches_provenance.sql` and `20260920191000_prospect_searches_rls.sql`).
+  - Applies real migration files (`20260920190000_prospect_searches_provenance.sql`, `20260920191000_prospect_searches_rls.sql`, and `20260920193000_prospect_searches_hardening.sql`).
   - **TEST A**: 1 search + 1 lead -> `prospect_searches=1`, `prospect_search_leads=1`, `prospect_leads_google=1`.
   - **TEST B**: 1 search + 5 leads -> 5 relations in `prospect_search_leads`.
   - **TEST C**: 1 search + 20 leads -> 20 relations in `prospect_search_leads`.
   - **TEST D**: Same search + same lead duplicate insert -> 1 relation in `prospect_search_leads`.
   - **TEST E**: Search A + Lead X, Search B + Lead X -> 1 canonical lead in `prospect_leads_google`, 2 relations in `prospect_search_leads`.
   - **TEST F**: Pre-existing lead with commercial SDR state (`lead_status="QUALIFIED_MQL"`) scraped in new Search B -> Commercial state preserved.
+  - **TEST G**: CID Collision Provenance -> Search A (place-AAA/cid-X) + Search B (place-BBB/cid-X) -> 1 canonical lead `place-AAA`, 2 relations in `prospect_search_leads` pointing to `place-AAA` (`ROWS_CANONICAL=1`, `PROVENANCE_LINKS=2`, `PROVENANCE_FAILED=0`).
+  - **TEST H**: WhatsApp Collision Provenance -> Search A (place-111/wa-Y) + Search B (place-222/wa-Y) -> 1 canonical lead `place-111`, 2 relations in `prospect_search_leads` pointing to `place-111` (`ROWS_CANONICAL=1`, `PROVENANCE_LINKS=2`, `PROVENANCE_FAILED=0`).
+  - **TEST I**: Invalid Search Status Validation -> `RegisterSearch` or `UpdateSearchStatus` with status "bogus" -> returns error, increments `ProvenanceFailed`.
 - `TestDatabaseFirstReadPathScenarios`:
-  - Validates Database-First Read Path matching completed searches in `public.prospect_searches`.
-  - Verifies exact match query retrieval, canonical lead fetching from `prospect_search_leads` JOIN `prospect_leads_google`.
+  - Validates Feature Flag `PROSPECT_READ_MODE=current|database`.
+  - Validates Partial Result Guard (`requested=20`, `available=3` -> HIT denied, forces scrape).
+  - Validates exact match query retrieval and canonical lead fetching from `prospect_search_leads` JOIN `prospect_leads_google`.
   - Verifies CSV file generation matching `gmaps.Entry` header specifications.
-  - Verifies non-existent search query handling gracefully falling back to scraping.
 
 ### 3. CI Pipeline Integration (GitHub Actions)
 - PostgreSQL 16 service container listening on port `5439:5432`.
@@ -37,10 +40,12 @@
 - `PROSPECT_DATABASE_URL="postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable" go test -v ./shadow/...` for mandatory integration testing.
 
 ### 4. Acceptance Gate Metrics (Search to Lead Provenance Gate 1)
+- `PROSPECT_READ_MODE`: `current` (default)
 - `SEARCHES_CREATED`: 1
 - `SEARCH_LEAD_LINKS`: 3
 - `DUPLICATE_LINKS`: 0
 - `CANONICAL_LEADS`: 3
+- `PROVENANCE_FAILED`: 0
 - `UI_REGRESSION`: 0
 - `MAP_REGRESSION`: 0
 
