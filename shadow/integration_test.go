@@ -118,6 +118,12 @@ func TestIntegrationScalingProgression(t *testing.T) {
 
 	var count1 int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&count1))
+	if count1 == 0 {
+		m := writer.GetMetrics()
+		t.Logf("DIAGNOSTIC METRICS: Inserted=%d Updated=%d Unchanged=%d Failed=%d", m.Inserted, m.Updated, m.Unchanged, m.Failed)
+		directErr := writer.UpsertLead(ctx, dataset[0])
+		t.Fatalf("Test 1 failed to persist lead. Direct UpsertLead error: %v", directErr)
+	}
 	assert.Equal(t, 1, count1, "Count must be 1 after Test 1")
 
 	var savedPhoneNorm string
