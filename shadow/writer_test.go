@@ -131,3 +131,42 @@ func TestProspectLeadMapperAndValidator(t *testing.T) {
 		assert.ErrorIs(t, err, ErrMissingPlaceName)
 	})
 }
+
+func TestGoogleMapsLinkFallback(t *testing.T) {
+	mapper := NewProspectLeadMapper()
+
+	t.Run("Step 1: Direct Link present", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title: "Test Place 1",
+			Link:  "https://maps.google.com/?cid=112233",
+		}
+		lead := mapper.MapToProspectLead(entry, "", "")
+		assert.Equal(t, "https://maps.google.com/?cid=112233", lead.GoogleMapsLink)
+	})
+
+	t.Run("Step 2: Fallback to PlaceID query", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title:   "Test Place 2",
+			PlaceID: "ChIJN1t_tDeuEmsRUsoyG83frY4",
+		}
+		lead := mapper.MapToProspectLead(entry, "", "")
+		assert.Equal(t, "https://www.google.com/maps/search/?api=1&query_place_id=ChIJN1t_tDeuEmsRUsoyG83frY4", lead.GoogleMapsLink)
+	})
+
+	t.Run("Step 3: Fallback to CID URL", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title: "Test Place 3",
+			Cid:   "1234567890",
+		}
+		lead := mapper.MapToProspectLead(entry, "", "")
+		assert.Equal(t, "https://www.google.com/maps?cid=1234567890", lead.GoogleMapsLink)
+	})
+
+	t.Run("Step 4: All missing returns empty without error", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title: "Test Place 4",
+		}
+		lead := mapper.MapToProspectLead(entry, "", "")
+		assert.Equal(t, "", lead.GoogleMapsLink)
+	})
+}

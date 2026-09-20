@@ -3,9 +3,11 @@ package shadow
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/gosom/google-maps-scraper/gmaps"
+	"github.com/gosom/google-maps-scraper/log"
 )
 
 // ProspectLead represents the internal model for public.prospect_leads_google.
@@ -83,6 +85,23 @@ func (m *ProspectLeadMapper) MapToProspectLead(entry *gmaps.Entry, jobID, jobNam
 	categoriesJSON, _ := json.Marshal(entry.Categories)
 	emailsJSON, _ := json.Marshal(entry.Emails)
 
+	// Google Maps Link Fallback Logic (Mandatory Order)
+	googleMapsLink := strings.TrimSpace(entry.Link)
+	if googleMapsLink == "" {
+		placeIDVal := strings.TrimSpace(entry.PlaceID)
+		if placeIDVal == "" {
+			placeIDVal = strings.TrimSpace(entry.DataID)
+		}
+		if placeIDVal != "" {
+			googleMapsLink = fmt.Sprintf("https://www.google.com/maps/search/?api=1&query_place_id=%s", url.QueryEscape(placeIDVal))
+		} else if strings.TrimSpace(entry.Cid) != "" {
+			googleMapsLink = fmt.Sprintf("https://www.google.com/maps?cid=%s", url.QueryEscape(strings.TrimSpace(entry.Cid)))
+		} else {
+			googleMapsLink = ""
+			log.Warn("google maps link fallback missing link, place_id, data_id, and cid", "place", entry.Title)
+		}
+	}
+
 	return &ProspectLead{
 		PlaceID:        placeID,
 		Cid:            entry.Cid,
@@ -104,7 +123,7 @@ func (m *ProspectLeadMapper) MapToProspectLead(entry *gmaps.Entry, jobID, jobNam
 		ReviewCount:    entry.ReviewCount,
 		Latitude:       entry.Latitude,
 		Longitude:      entry.Longtitude,
-		GoogleMapsLink: entry.Link,
+		GoogleMapsLink: googleMapsLink,
 		JobID:          jobID,
 		JobName:        jobName,
 		CategoriesJSON: categoriesJSON,
