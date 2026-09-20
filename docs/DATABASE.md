@@ -11,12 +11,12 @@
   - Partial Unique CID Index: `prospect_leads_google_cid_unique` (`cid` WHERE `cid IS NOT NULL AND cid != ''`)
   - Search Indexes: `idx_prospect_leads_google_whatsapp`, `idx_prospect_leads_google_cid`
 
-### `public.prospect_searches` (NEW in GRU-88)
-- **Primary Key**: `id` (UUID, DEFAULT gen_random_uuid())
-- **External Job Key**: `external_job_id` (TEXT, UNIQUE, NOT NULL)
-- **Columns**: `id`, `external_job_id`, `query`, `location`, `requested_limit`, `status`, `created_at`, `started_at`, `completed_at`, `updated_at`, `error`
+### `public.prospect_searches` (GRU-88)
+- **Primary Key**: `search_id` (TEXT)
+- **Job Reference**: `job_id` (TEXT, NOT NULL)
+- **Columns**: `search_id`, `job_id`, `job_name`, `query`, `location`, `category`, `requested_limit`, `status`, `error_message`, `created_at`, `started_at`, `completed_at`, `updated_at`
 - **Constraints**: Check constraint on `status IN ('created', 'running', 'completed', 'failed')`
-- **Indexes**: `idx_prospect_searches_job_id`, `idx_prospect_searches_status`, `idx_prospect_searches_created_at`
+- **Indexes**: `idx_prospect_searches_job_id`, `idx_prospect_searches_status`
 
 ### `public.prospect_search_leads` (NEW in GRU-88)
 - **Composite Primary Key**: `(search_id, place_id)`

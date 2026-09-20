@@ -154,6 +154,46 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 
 	outpath := filepath.Join(w.cfg.DataFolder, job.ID+".csv")
 
+	// DATABASE-FIRST READ PATH (GATE 2):
+	// Check if a completed search for the same query/location already exists in PostgreSQL
+	if sw := shadow.NewWriterFromEnv(); sw != nil {
+		if shadowWriter, ok := sw.(*shadow.Writer); ok {
+			query := strings.Join(job.Data.Keywords, ", ")
+			var coords string
+			if job.Data.Lat != "" && job.Data.Lon != "" {
+				coords = job.Data.Lat + "," + job.Data.Lon
+			}
+
+			if cachedSearch, err := shadowWriter.FindCompletedSearch(ctx, query, coords); err == nil && cachedSearch != nil {
+				leads, fetchErr := shadowWriter.FetchLeadsForSearch(ctx, cachedSearch.SearchID, job.Data.Depth)
+				if fetchErr == nil && len(leads) > 0 {
+					log.Printf("[DB-FIRST READ PATH HIT] Job %s served %d leads from database search %s", job.ID, len(leads), cachedSearch.SearchID)
+
+					if err := shadowWriter.WriteLeadsToCSVFile(leads, outpath); err == nil {
+						_ = shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+							SearchID:       job.ID,
+							JobID:          job.ID,
+							JobName:        job.Name,
+							Query:          query,
+							Location:       coords,
+							Category:       query,
+							RequestedLimit: job.Data.Depth,
+						})
+
+						for order, lead := range leads {
+							_ = shadowWriter.LinkLeadToSearch(ctx, job.ID, lead.PlaceID, order+1)
+						}
+
+						_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", "")
+
+						job.Status = web.StatusOK
+						return w.svc.Update(ctx, job)
+					}
+				}
+			}
+		}
+	}
+
 	outfile, err := os.Create(outpath)
 	if err != nil {
 		return err

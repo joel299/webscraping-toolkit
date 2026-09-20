@@ -25,7 +25,11 @@
   - **TEST D**: Same search + same lead duplicate insert -> 1 relation in `prospect_search_leads`.
   - **TEST E**: Search A + Lead X, Search B + Lead X -> 1 canonical lead in `prospect_leads_google`, 2 relations in `prospect_search_leads`.
   - **TEST F**: Pre-existing lead with commercial SDR state (`lead_status="QUALIFIED_MQL"`) scraped in new Search B -> Commercial state preserved.
-- `TestShadowFallbackMode`: Confirms application graceful operation when database connection is unreachable or offline (shadow-fail mode tolerance).
+- `TestDatabaseFirstReadPathScenarios`:
+  - Validates Database-First Read Path matching completed searches in `public.prospect_searches`.
+  - Verifies exact match query retrieval, canonical lead fetching from `prospect_search_leads` JOIN `prospect_leads_google`.
+  - Verifies CSV file generation matching `gmaps.Entry` header specifications.
+  - Verifies non-existent search query handling gracefully falling back to scraping.
 
 ### 3. CI Pipeline Integration (GitHub Actions)
 - PostgreSQL 16 service container listening on port `5439:5432`.

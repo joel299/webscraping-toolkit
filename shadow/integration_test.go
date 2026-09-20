@@ -610,3 +610,90 @@ func TestShadowFallbackMode(t *testing.T) {
 	err := writer.Run(ctx, ch)
 	assert.NoError(t, err, "Shadow writer in fallback mode must not fail or crash scrapemate pipeline")
 }
+
+func TestDatabaseFirstReadPathScenarios(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	config, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Skip("Skipping integration test: PostgreSQL container not reachable")
+		return
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil || pool.Ping(ctx) != nil {
+		t.Skip("Skipping integration test: PostgreSQL container ping failed")
+		return
+	}
+	defer pool.Close()
+
+	// 1. Clean & Apply migrations
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_search_leads CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_searches CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+	require.NoError(t, applyMigrationFiles(ctx, pool))
+
+	writer := NewWriter(pool, 5*time.Second, 10)
+
+	// 2. Populate an initial completed search (Search 1: "Pizzaria", "-20.45,-54.60") with 3 leads
+	search1 := &SearchContext{
+		SearchID:       "search-dbfirst-001",
+		JobID:          "job-dbfirst-001",
+		JobName:        "Pizzaria Campo Grande",
+		Query:          "Pizzaria",
+		Location:       "-20.45,-54.60",
+		Category:       "Pizzaria",
+		RequestedLimit: 3,
+	}
+	require.NoError(t, writer.RegisterSearch(ctx, search1))
+
+	lead1 := &gmaps.Entry{Title: "Pizza Central", Category: "Pizzaria", Address: "Rua A 1", Phone: "67991111111", Latitude: -20.45, Longtitude: -54.60, Link: "https://maps.google.com/?cid=101"}
+	lead2 := &gmaps.Entry{Title: "Pizza Express", Category: "Pizzaria", Address: "Rua B 2", Phone: "67992222222", Latitude: -20.46, Longtitude: -54.61, Link: "https://maps.google.com/?cid=102"}
+	lead3 := &gmaps.Entry{Title: "Pizza Italia", Category: "Pizzaria", Address: "Rua C 3", Phone: "67993333333", Latitude: -20.47, Longtitude: -54.62, Link: "https://maps.google.com/?cid=103"}
+
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, search1.SearchID, search1.JobName))
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead2, search1.SearchID, search1.JobName))
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead3, search1.SearchID, search1.JobName))
+	require.NoError(t, writer.UpdateSearchStatus(ctx, search1.SearchID, "completed", ""))
+
+	// 3. Test FindCompletedSearch: Exact Query Match
+	cached, err := writer.FindCompletedSearch(ctx, "Pizzaria", "-20.45,-54.60")
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+	assert.Equal(t, search1.SearchID, cached.SearchID)
+
+	// 4. Test FetchLeadsForSearch
+	fetchedLeads, err := writer.FetchLeadsForSearch(ctx, cached.SearchID, 3)
+	require.NoError(t, err)
+	assert.Len(t, fetchedLeads, 3)
+	assert.Equal(t, "Pizza Central", fetchedLeads[0].PlaceName)
+	assert.Equal(t, "Pizza Express", fetchedLeads[1].PlaceName)
+	assert.Equal(t, "Pizza Italia", fetchedLeads[2].PlaceName)
+
+	// 5. Test Exporting fetched leads to CSV File
+	tmpCSV := filepath.Join(t.TempDir(), "test_db_first_export.csv")
+	require.NoError(t, writer.WriteLeadsToCSVFile(fetchedLeads, tmpCSV))
+	assert.FileExists(t, tmpCSV)
+
+	// Verify CSV contents
+	csvData, err := os.ReadFile(tmpCSV)
+	require.NoError(t, err)
+	assert.Contains(t, string(csvData), "Pizza Central")
+	assert.Contains(t, string(csvData), "Pizza Express")
+	assert.Contains(t, string(csvData), "Pizza Italia")
+
+	// 6. Test Non-existent search query returns error
+	noCached, err := writer.FindCompletedSearch(ctx, "Sushi Bar", "-20.45,-54.60")
+	assert.Error(t, err, "Non-existent search must return error / no rows")
+	assert.Nil(t, noCached)
+}

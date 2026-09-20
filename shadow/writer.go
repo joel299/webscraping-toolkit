@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"os"
@@ -607,5 +608,134 @@ func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, 
 		_ = w.LinkLeadToSearch(ctx, lead.JobID, canonicalPlaceID, 0)
 	}
 
+	return nil
+}
+
+// FindCompletedSearch searches for an existing completed search matching query and optional location.
+func (w *Writer) FindCompletedSearch(ctx context.Context, query string, location string) (*SearchContext, error) {
+	if w.disabled || w.pool == nil {
+		return nil, errors.New("writer disabled or uninitialized")
+	}
+
+	query = strings.TrimSpace(query)
+	location = strings.TrimSpace(location)
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+
+	sql := `
+		SELECT search_id, job_id, COALESCE(query, ''), COALESCE(location, ''), COALESCE(category, ''), requested_limit
+		FROM public.prospect_searches
+		WHERE status = 'completed'
+		  AND LOWER(TRIM(query)) = LOWER($1)
+		  AND ($2 = '' OR LOWER(TRIM(location)) = LOWER($2))
+		ORDER BY completed_at DESC NULLS LAST, created_at DESC
+		LIMIT 1
+	`
+
+	var s SearchContext
+	err := w.pool.QueryRow(ctx, sql, query, location).Scan(
+		&s.SearchID,
+		&s.JobID,
+		&s.Query,
+		&s.Location,
+		&s.Category,
+		&s.RequestedLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// FetchLeadsForSearch retrieves the canonical leads linked to a specific search_id.
+func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit int) ([]*ProspectLead, error) {
+	if w.disabled || w.pool == nil {
+		return nil, errors.New("writer disabled or uninitialized")
+	}
+
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	sql := `
+		SELECT 
+			g.place_id, COALESCE(g.cid, ''), g.place_name, COALESCE(g.category, ''),
+			COALESCE(g.address, ''), COALESCE(g.street, ''), COALESCE(g.city, ''),
+			COALESCE(g.state, ''), COALESCE(g.postal_code, ''), COALESCE(g.country, ''),
+			COALESCE(g.phone, ''), COALESCE(g.whatsapp, ''), COALESCE(g.website, ''),
+			COALESCE(g.email, ''), g.review_rating, g.review_count,
+			g.latitude, g.longitude, COALESCE(g.google_maps_link, '')
+		FROM public.prospect_search_leads sl
+		JOIN public.prospect_leads_google g ON sl.place_id = g.place_id
+		WHERE sl.search_id = $1
+		ORDER BY sl.result_order ASC, sl.discovered_at ASC, sl.created_at ASC
+		LIMIT $2
+	`
+
+	rows, err := w.pool.Query(ctx, sql, searchID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leads []*ProspectLead
+	for rows.Next() {
+		var l ProspectLead
+		err := rows.Scan(
+			&l.PlaceID, &l.Cid, &l.PlaceName, &l.Category,
+			&l.Address, &l.Street, &l.City,
+			&l.State, &l.PostalCode, &l.Country,
+			&l.Phone, &l.Whatsapp, &l.Website,
+			&l.Email, &l.ReviewRating, &l.ReviewCount,
+			&l.Latitude, &l.Longitude, &l.GoogleMapsLink,
+		)
+		if err != nil {
+			return nil, err
+		}
+		leads = append(leads, &l)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return leads, nil
+}
+
+// WriteLeadsToCSVFile exports a slice of ProspectLeads to a standard CSV file matching gmaps.Entry header specs.
+func (w *Writer) WriteLeadsToCSVFile(leads []*ProspectLead, filePath string) error {
+	f, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	cw := csv.NewWriter(f)
+	defer cw.Flush()
+
+	header := (&gmaps.Entry{}).CsvHeaders()
+	if err := cw.Write(header); err != nil {
+		return err
+	}
+
+	for _, lead := range leads {
+		entry := &gmaps.Entry{
+			Title:        lead.PlaceName,
+			Category:     lead.Category,
+			Address:      lead.Address,
+			WebSite:      lead.Website,
+			Phone:        lead.Phone,
+			ReviewCount:  lead.ReviewCount,
+			ReviewRating: lead.ReviewRating,
+			Latitude:     lead.Latitude,
+			Longtitude:   lead.Longitude,
+			Cid:          lead.Cid,
+			Link:         lead.GoogleMapsLink,
+		}
+		if err := cw.Write(entry.CsvRow()); err != nil {
+			return err
+		}
+	}
 	return nil
 }

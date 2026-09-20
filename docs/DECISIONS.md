@@ -35,8 +35,14 @@
 - **Context**: Re-scraping places with partial data could overwrite existing enriched data with empty strings.
 - **Decision**: Implement non-destructive UPSERT logic preserving existing non-empty attributes whenever newly scraped data is empty.
 
-## ADR-008: Search-to-Lead Provenance before Database-First Read Path (GRU-88 Gate 1)
+## ADR-008: Search-to-Lead Provenance Implementation (GRU-88 Gate 1)
 - **Status**: Accepted
-- **Context**: Before serving lead search results from the database (database-first read path, cache, Redis, freshness), the system must explicitly know which leads belong to which search request and which search created a lead.
-- **Decision**: Implement provenance tables `public.prospect_searches` and `public.prospect_search_leads` linking `search_id` to `place_id` incrementally during scraping. Database-first read path, Redis, cache-first, and freshness are postponed until Gate 1 is validated.
+- **Context**: Before serving lead search results from the database (database-first read path), the system must explicitly know which leads belong to which search request.
+- **Decision**: Implement provenance tables `public.prospect_searches` and `public.prospect_search_leads` linking `search_id` to `place_id` incrementally during scraping.
+
+## ADR-009: Database-First Read Path Execution (GRU-88 Gate 2)
+- **Status**: Accepted
+- **Context**: Scraping identical queries repeatedly wastes Playwright compute and increases latency.
+- **Decision**: When a search is created, check `public.prospect_searches` for an existing completed search matching `(query, location)`. If a match with leads exists, serve results directly from PostgreSQL, generating the job's CSV file without launching the Playwright browser. If no match is found, fall back seamlessly to Playwright scraping.
+
 
