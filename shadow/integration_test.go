@@ -43,6 +43,10 @@ func applyMigrationFiles(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func TestIntegrationScalingProgression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
 	testDSN := "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
