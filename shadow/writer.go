@@ -303,6 +303,10 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 	}
 }
 
+func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
+	return w.upsertLead(ctx, entry)
+}
+
 func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 	placeID := entry.DataID
 	if placeID == "" {
