@@ -1,5 +1,5 @@
 -- Migration: prospect_leads_google_persistence.sql
--- Description: Idempotent migration for public.prospect_leads_google and public.leads for Gosom Google Maps Scraper
+-- Description: Idempotent migration for public.prospect_leads_google for Gosom Google Maps Scraper
 -- Version: 20260920153500
 
 -- 1. Main Table: public.prospect_leads_google
@@ -66,47 +66,10 @@ ALTER TABLE public.prospect_leads_google ADD COLUMN IF NOT EXISTS commercial_his
 ALTER TABLE public.prospect_leads_google ADD COLUMN IF NOT EXISTS appointments JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE public.prospect_leads_google ADD COLUMN IF NOT EXISTS responses JSONB DEFAULT '[]'::jsonb;
 
--- Indexes
+-- Indexes for fast lookup
 CREATE INDEX IF NOT EXISTS idx_prospect_leads_google_whatsapp ON public.prospect_leads_google(whatsapp);
 CREATE INDEX IF NOT EXISTS idx_prospect_leads_google_cid ON public.prospect_leads_google(cid);
 
--- 2. Legacy Dual-Write Table: public.leads
-CREATE TABLE IF NOT EXISTS public.leads (
-    place_id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    category TEXT,
-    categories JSONB,
-    address TEXT,
-    street TEXT,
-    city TEXT,
-    state TEXT,
-    postal_code TEXT,
-    country TEXT,
-    phone TEXT,
-    phone_normalized TEXT,
-    website TEXT,
-    emails JSONB,
-    email TEXT,
-    review_rating NUMERIC(3,2),
-    review_count INT,
-    latitude DOUBLE PRECISION,
-    longitude DOUBLE PRECISION,
-    google_maps_link TEXT,
-    job_id TEXT,
-    job_name TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    lead_status TEXT DEFAULT 'new',
-    pipeline_stage TEXT DEFAULT 'prospect',
-    followup_count INT DEFAULT 0,
-    followup_at TIMESTAMPTZ,
-    followup_notes TEXT,
-    converted BOOLEAN DEFAULT FALSE,
-    do_not_contact BOOLEAN DEFAULT FALSE,
-    processing_status TEXT DEFAULT 'pending',
-    sdr_owner TEXT,
-    commercial_history JSONB DEFAULT '[]'::jsonb,
-    appointments JSONB DEFAULT '[]'::jsonb,
-    responses JSONB DEFAULT '[]'::jsonb
-);
+-- Unique Partial Indexes for Deduplication (GATE 7)
+CREATE UNIQUE INDEX IF NOT EXISTS prospect_leads_google_whatsapp_unique ON public.prospect_leads_google (whatsapp) WHERE whatsapp IS NOT NULL AND whatsapp != '';
+CREATE UNIQUE INDEX IF NOT EXISTS prospect_leads_google_cid_unique ON public.prospect_leads_google (cid) WHERE cid IS NOT NULL AND cid != '';

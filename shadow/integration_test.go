@@ -8,18 +8,44 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/gosom/scrapemate"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gosom/google-maps-scraper/gmaps"
 )
 
+// applyMigrationFiles executes real versioned SQL migrations (GATE 3).
+func applyMigrationFiles(ctx context.Context, pool *pgxpool.Pool) error {
+	mig1 := "../supabase/migrations/20260920153500_prospect_leads_google_persistence.sql"
+	mig2 := "../supabase/migrations/20260920161000_prospect_leads_google_rls.sql"
+
+	content1, err := os.ReadFile(mig1)
+	if err != nil {
+		return fmt.Errorf("failed to read migration 1: %w", err)
+	}
+
+	content2, err := os.ReadFile(mig2)
+	if err != nil {
+		return fmt.Errorf("failed to read migration 2: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, string(content1)); err != nil {
+		return fmt.Errorf("failed to apply migration 1: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, string(content2)); err != nil {
+		return fmt.Errorf("failed to apply migration 2: %w", err)
+	}
+
+	return nil
+}
+
 func TestIntegrationScalingProgression(t *testing.T) {
 	testDSN := "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	config, err := pgxpool.ParseConfig(testDSN)
@@ -41,36 +67,36 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	require.NoError(t, os.WriteFile(secretPath, []byte(testDSN+"\n"), 0600))
 	t.Setenv("PROSPECT_DATABASE_URL_FILE", secretPath)
 
-	// 2. Initialize Shadow Writer
+	// 2. Clean database & Apply real migration files (GATE 3)
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.leads CASCADE")
+	require.NoError(t, applyMigrationFiles(ctx, pool))
+
+	// 3. Initialize Shadow Writer
 	rawWriter := NewWriterFromEnv()
 	writer, ok := rawWriter.(*Writer)
 	require.True(t, ok)
 	require.False(t, writer.disabled)
 
-	// Reset tables
-	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google")
-	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.leads")
-	require.NoError(t, initSchema(ctx, pool))
-
 	// Build 20 distinct entries
 	var dataset []*gmaps.Entry
 	for i := 1; i <= 20; i++ {
 		entry := &gmaps.Entry{
-			ID:          fmt.Sprintf("lead-%03d", i),
-			DataID:      fmt.Sprintf("data-%03d", i),
-			Cid:         fmt.Sprintf("cid-%03d", i),
-			Title:       fmt.Sprintf("Empresa Teste Comercial %03d", i),
-			Category:    "Hamburgueria",
-			Categories:  []string{"Hamburgueria", "Restaurante"},
-			Address:     fmt.Sprintf("Rua Afonso Pena, %d - Campo Grande, MS", i*10),
-			Phone:       fmt.Sprintf("+55 (67) 99000-%04d", i),
-			WebSite:     fmt.Sprintf("https://empresa%03d.com.br", i),
-			Emails:      []string{fmt.Sprintf("contato@empresa%03d.com.br", i)},
+			ID:           fmt.Sprintf("lead-%03d", i),
+			DataID:       fmt.Sprintf("data-%03d", i),
+			Cid:          fmt.Sprintf("cid-%03d", i),
+			Title:        fmt.Sprintf("Empresa Teste Comercial %03d", i),
+			Category:     "Hamburgueria",
+			Categories:   []string{"Hamburgueria", "Restaurante"},
+			Address:      fmt.Sprintf("Rua Afonso Pena, %d - Campo Grande, MS", i*10),
+			Phone:        fmt.Sprintf("+55 (67) 99000-%04d", i),
+			WebSite:      fmt.Sprintf("https://empresa%03d.com.br", i),
+			Emails:       []string{fmt.Sprintf("contato@empresa%03d.com.br", i)},
 			ReviewRating: 4.5 + float64(i%5)*0.1,
-			ReviewCount: 50 + i*5,
-			Latitude:    -20.4500 + float64(i)*0.001,
-			Longtitude:  -54.6000 + float64(i)*0.001,
-			Link:        fmt.Sprintf("https://maps.google.com/?cid=cid-%03d", i),
+			ReviewCount:  50 + i*5,
+			Latitude:     -20.4500 + float64(i)*0.001,
+			Longtitude:   -54.6000 + float64(i)*0.001,
+			Link:         fmt.Sprintf("https://maps.google.com/?cid=cid-%03d", i),
 		}
 		dataset = append(dataset, entry)
 	}
@@ -91,7 +117,6 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	assert.Equal(t, "5567990000001", savedPhoneNorm, "Phone BR must be normalized to 5567990000001")
 
 	// --- TEST 2: RE-RUN SAME LEAD (UPSERT & COMMERCIAL PRESERVATION) ---
-	// Update SDR commercial state directly in Postgres
 	_, err = pool.Exec(ctx, `
 		UPDATE public.prospect_leads_google SET
 			lead_status = 'QUALIFIED_SDR',
@@ -103,7 +128,6 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	`, "data-001")
 	require.NoError(t, err)
 
-	// Rescrape modified lead 1
 	updatedEntry1 := *dataset[0]
 	updatedEntry1.Title = "Empresa Teste Comercial 001 - Premium"
 	updatedEntry1.ReviewRating = 4.9
@@ -119,12 +143,12 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	assert.Equal(t, 1, count2, "Count must remain 1 (zero duplicates created)")
 
 	var (
-		checkTitle       string
-		checkRating      float64
-		checkLeadStatus  string
-		checkPipeline    string
-		checkFollowup    int
-		checkConverted   bool
+		checkTitle        string
+		checkRating       float64
+		checkLeadStatus   string
+		checkPipeline     string
+		checkFollowup     int
+		checkConverted    bool
 		checkDoNotContact bool
 	)
 	err = pool.QueryRow(ctx, `
@@ -140,6 +164,46 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	assert.Equal(t, 5, checkFollowup, "followup_count must be preserved")
 	assert.True(t, checkConverted, "converted must be preserved")
 	assert.True(t, checkDoNotContact, "do_not_contact must be preserved")
+
+	// --- TEST 2B: NON-DESTRUCTIVE ENRICHMENT PRESERVATION (GATE 8) ---
+	emptyReScrape := *dataset[0]
+	emptyReScrape.Title = "Empresa Teste Comercial 001 - Premium"
+	emptyReScrape.ReviewRating = 4.9
+	emptyReScrape.WebSite = "" // Empty on new scrape
+	emptyReScrape.Phone = ""   // Empty on new scrape
+	emptyReScrape.Address = "" // Empty on new scrape
+
+	ch2b := make(chan scrapemate.Result, 1)
+	ch2b <- scrapemate.Result{Data: &emptyReScrape}
+	close(ch2b)
+
+	require.NoError(t, writer.Run(ctx, ch2b))
+
+	var (
+		preservedWebsite  string
+		preservedWhatsapp string
+		preservedAddress  string
+	)
+	err = pool.QueryRow(ctx, `
+		SELECT website, whatsapp, address
+		FROM public.prospect_leads_google WHERE place_id = $1
+	`, "data-001").Scan(&preservedWebsite, &preservedWhatsapp, &preservedAddress)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://empresa001.com.br", preservedWebsite, "Existing website must be preserved when new scrape is empty")
+	assert.Equal(t, "5567990000001", preservedWhatsapp, "Existing whatsapp must be preserved when new scrape is empty")
+	assert.Contains(t, preservedAddress, "Rua Afonso Pena, 10", "Existing address must be preserved when new scrape is empty")
+
+	// --- TEST 2C: UNCHANGED METRICS INCREMENT (GATE 9) ---
+	metricsBefore := writer.GetMetrics()
+	ch2c := make(chan scrapemate.Result, 1)
+	ch2c <- scrapemate.Result{Data: &emptyReScrape} // Exact same data again
+	close(ch2c)
+
+	require.NoError(t, writer.Run(ctx, ch2c))
+	metricsAfter := writer.GetMetrics()
+
+	assert.Equal(t, metricsBefore.Unchanged+1, metricsAfter.Unchanged, "Unchanged metric must increment when identical lead is re-scraped")
 
 	// --- TEST 3: 5 LEADS ---
 	ch3 := make(chan scrapemate.Result, 4)

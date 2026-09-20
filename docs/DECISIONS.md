@@ -19,3 +19,18 @@
 - **Status**: Accepted
 - **Context**: Commercial sales teams update lead status independently from scraping.
 - **Decision**: Use `ON CONFLICT (place_id) DO UPDATE` targeting discovery fields only, leaving SDR pipeline fields untouched.
+
+## ADR-005: Elimination of Runtime DDL (GATE 4)
+- **Status**: Accepted
+- **Context**: Executing `CREATE TABLE` / `ALTER TABLE` inside application runtime creates permission bloat and migration drift.
+- **Decision**: Remove all DDL from application runtime (`shadow/writer.go`). Schema creation is governed exclusively by versioned migration files in `supabase/migrations/`.
+
+## ADR-006: Single Canonical Persistence Table (GATE 6)
+- **Status**: Accepted
+- **Context**: Dual-writing to `public.leads` had no active consumers and suppressed error handling.
+- **Decision**: Eliminate dual-write logic. Persist exclusively to `public.prospect_leads_google`.
+
+## ADR-007: Non-Destructive Enrichment Protection (GATE 8)
+- **Status**: Accepted
+- **Context**: Re-scraping places with partial data could overwrite existing enriched data (website, phone, address, etc.) with empty strings.
+- **Decision**: Implement non-destructive UPSERT logic preserving existing non-empty attributes whenever newly scraped data is empty.

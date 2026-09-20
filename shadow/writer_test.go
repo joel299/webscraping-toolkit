@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gosom/google-maps-scraper/gmaps"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,4 +85,49 @@ func TestNewDisabledWriter(t *testing.T) {
 	w := NewDisabledWriter()
 	require.NotNil(t, w)
 	assert.True(t, w.disabled)
+}
+
+func TestProspectLeadMapperAndValidator(t *testing.T) {
+	mapper := NewProspectLeadMapper()
+	validator := NewProspectLeadValidator()
+
+	t.Run("Valid gmaps Entry with DataID", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title:   "Padaria Central",
+			DataID:  "data-12345",
+			Phone:   "(67) 99999-1111",
+			Address: "Rua Principial, 100",
+		}
+
+		lead := mapper.MapToProspectLead(entry, "job-1", "Search Job")
+		require.NotNil(t, lead)
+		assert.Equal(t, "data-12345", lead.PlaceID)
+		assert.Equal(t, "5567999991111", lead.Whatsapp)
+		assert.Equal(t, "job-1", lead.JobID)
+
+		err := validator.Validate(lead)
+		assert.NoError(t, err)
+	})
+
+	t.Run("Fallback to CID when DataID is empty", func(t *testing.T) {
+		entry := &gmaps.Entry{
+			Title: "Oficina Mecanica",
+			Cid:   "cid-998877",
+		}
+
+		lead := mapper.MapToProspectLead(entry, "", "")
+		require.NotNil(t, lead)
+		assert.Equal(t, "cid-cid-998877", lead.PlaceID)
+
+		err := validator.Validate(lead)
+		assert.NoError(t, err)
+	})
+
+	t.Run("Validator rejects empty place_name", func(t *testing.T) {
+		lead := &ProspectLead{
+			PlaceID: "place-1",
+		}
+		err := validator.Validate(lead)
+		assert.ErrorIs(t, err, ErrMissingPlaceName)
+	})
 }

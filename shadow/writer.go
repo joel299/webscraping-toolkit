@@ -2,7 +2,6 @@ package shadow
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"regexp"
 	"strings"
@@ -10,37 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/gosom/scrapemate"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gosom/google-maps-scraper/gmaps"
 	"github.com/gosom/google-maps-scraper/log"
 )
 
-var nonDigitRegex = regexp.MustCompile(`\D+`)
 var dsnPasswordRegex = regexp.MustCompile(`postgres(ql)?://([^:]+):([^@]+)@`)
-
-// NormalizePhoneBR converts Brazilian phone numbers to 55 + DDD + number (digits only).
-func NormalizePhoneBR(phone string) string {
-	digits := nonDigitRegex.ReplaceAllString(phone, "")
-	if digits == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(digits, "0") && len(digits) >= 11 {
-		digits = strings.TrimPrefix(digits, "0")
-	}
-
-	if strings.HasPrefix(digits, "55") && (len(digits) == 12 || len(digits) == 13) {
-		return digits
-	}
-
-	if len(digits) == 10 || len(digits) == 11 {
-		return "55" + digits
-	}
-
-	return digits
-}
 
 // SanitizeDSN removes passwords from connection strings to prevent credential exposure in logs.
 func SanitizeDSN(dsn string) string {
@@ -50,7 +26,7 @@ func SanitizeDSN(dsn string) string {
 	return dsnPasswordRegex.ReplaceAllString(dsn, "postgres://$2:*****@")
 }
 
-// LoadDSN loads the PostgreSQL DSN securely from server-side file or environment.
+// LoadDSN loads the PostgreSQL DSN securely from server-side secret file or environment.
 func LoadDSN() string {
 	filePath := os.Getenv("PROSPECT_DATABASE_URL_FILE")
 	if filePath == "" {
@@ -86,8 +62,11 @@ type Writer struct {
 	metrics      Metrics
 	mu           sync.Mutex
 	disabled     bool
+	mapper       *ProspectLeadMapper
+	validator    *ProspectLeadValidator
 }
 
+// NewWriterFromEnv initializes the persistence writer using environment credentials.
 func NewWriterFromEnv() scrapemate.ResultWriter {
 	dsn := LoadDSN()
 	if dsn == "" {
@@ -115,23 +94,44 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 
 	if err := pool.Ping(ctx); err != nil {
 		log.Warn("shadow persistence operating in shadow-fail mode: ping failed", "dsn", SanitizeDSN(dsn), "error", err)
-	} else {
-		log.Info("shadow persistence connected successfully", "dsn", SanitizeDSN(dsn))
-		if err := initSchema(ctx, pool); err != nil {
-			log.Warn("shadow persistence schema init warning", "error", err)
+		return &Writer{
+			pool:         pool,
+			saveInterval: 5 * time.Second,
+			batchSize:    10,
+			mapper:       NewProspectLeadMapper(),
+			validator:    NewProspectLeadValidator(),
+			disabled:     false,
 		}
+	}
+
+	log.Info("shadow persistence connected successfully", "dsn", SanitizeDSN(dsn))
+	if err := ValidateSchema(ctx, pool); err != nil {
+		log.Warn("shadow persistence schema validation warning: table missing or unreadable; shadow writer entering shadow-fail mode", "error", err)
 	}
 
 	return &Writer{
 		pool:         pool,
 		saveInterval: 5 * time.Second,
 		batchSize:    10,
+		mapper:       NewProspectLeadMapper(),
+		validator:    NewProspectLeadValidator(),
 	}
+}
+
+// ValidateSchema verifies that public.prospect_leads_google exists without performing runtime DDL (GATE 4).
+func ValidateSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
+		return nil
+	}
+	_, err := pool.Exec(ctx, "SELECT 1 FROM public.prospect_leads_google LIMIT 0")
+	return err
 }
 
 func NewDisabledWriter() *Writer {
 	return &Writer{
-		disabled: true,
+		disabled:  true,
+		mapper:    NewProspectLeadMapper(),
+		validator: NewProspectLeadValidator(),
 	}
 }
 
@@ -140,6 +140,8 @@ func NewWriter(pool *pgxpool.Pool, saveInterval time.Duration, batchSize int) *W
 		pool:         pool,
 		saveInterval: saveInterval,
 		batchSize:    batchSize,
+		mapper:       NewProspectLeadMapper(),
+		validator:    NewProspectLeadValidator(),
 	}
 }
 
@@ -150,96 +152,6 @@ func (w *Writer) GetMetrics() Metrics {
 		Unchanged: atomic.LoadUint64(&w.metrics.Unchanged),
 		Failed:    atomic.LoadUint64(&w.metrics.Failed),
 	}
-}
-
-func initSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	q := `
-	CREATE TABLE IF NOT EXISTS public.prospect_leads_google (
-		place_id TEXT PRIMARY KEY,
-		cid TEXT,
-		place_name TEXT NOT NULL,
-		category TEXT,
-		categories JSONB,
-		address TEXT,
-		street TEXT,
-		city TEXT,
-		state TEXT,
-		postal_code TEXT,
-		country TEXT,
-		phone TEXT,
-		whatsapp TEXT,
-		website TEXT,
-		emails JSONB,
-		email TEXT,
-		review_rating NUMERIC,
-		review_count INT,
-		latitude DOUBLE PRECISION,
-		longitude DOUBLE PRECISION,
-		google_maps_link TEXT,
-		job_id TEXT,
-		job_name TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		
-		-- Commercial / SDR State Fields (PRESERVED ON UPSERT - NEVER OVERWRITTEN BY SCRAPER)
-		lead_status TEXT DEFAULT 'new',
-		pipeline_stage TEXT DEFAULT 'prospect',
-		followup_count INT DEFAULT 0,
-		followup_at TIMESTAMPTZ,
-		followup_notes TEXT,
-		converted BOOLEAN DEFAULT FALSE,
-		do_not_contact BOOLEAN DEFAULT FALSE,
-		processing_status TEXT DEFAULT 'pending',
-		sdr_owner TEXT,
-		commercial_history JSONB DEFAULT '[]'::jsonb,
-		appointments JSONB DEFAULT '[]'::jsonb,
-		responses JSONB DEFAULT '[]'::jsonb
-	);
-	CREATE INDEX IF NOT EXISTS idx_prospect_leads_google_whatsapp ON public.prospect_leads_google(whatsapp);
-	CREATE INDEX IF NOT EXISTS idx_prospect_leads_google_cid ON public.prospect_leads_google(cid);
-
-	CREATE TABLE IF NOT EXISTS public.leads (
-		place_id TEXT PRIMARY KEY,
-		title TEXT NOT NULL,
-		category TEXT,
-		categories JSONB,
-		address TEXT,
-		street TEXT,
-		city TEXT,
-		state TEXT,
-		postal_code TEXT,
-		country TEXT,
-		phone TEXT,
-		phone_normalized TEXT,
-		website TEXT,
-		emails JSONB,
-		email TEXT,
-		review_rating NUMERIC,
-		review_count INT,
-		latitude DOUBLE PRECISION,
-		longitude DOUBLE PRECISION,
-		google_maps_link TEXT,
-		job_id TEXT,
-		job_name TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-		lead_status TEXT DEFAULT 'new',
-		pipeline_stage TEXT DEFAULT 'prospect',
-		followup_count INT DEFAULT 0,
-		followup_at TIMESTAMPTZ,
-		followup_notes TEXT,
-		converted BOOLEAN DEFAULT FALSE,
-		do_not_contact BOOLEAN DEFAULT FALSE,
-		processing_status TEXT DEFAULT 'pending',
-		sdr_owner TEXT,
-		commercial_history JSONB DEFAULT '[]'::jsonb,
-		appointments JSONB DEFAULT '[]'::jsonb,
-		responses JSONB DEFAULT '[]'::jsonb
-	);
-	`
-	_, err := pool.Exec(ctx, q)
-	return err
 }
 
 func (w *Writer) Run(ctx context.Context, in <-chan scrapemate.Result) error {
@@ -308,90 +220,91 @@ func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
 }
 
 func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
-	placeID := entry.DataID
-	if placeID == "" {
-		placeID = entry.PlaceID
-	}
-	if placeID == "" {
-		placeID = entry.ID
-	}
-	if placeID == "" {
-		placeID = strings.ToLower(entry.Title + "|" + entry.Address)
+	if entry == nil {
+		return nil
 	}
 
-	phoneNorm := NormalizePhoneBR(entry.Phone)
-
-	var emailFirst string
-	if len(entry.Emails) > 0 {
-		emailFirst = entry.Emails[0]
+	lead := w.mapper.MapToProspectLead(entry, "", "")
+	if err := w.validator.Validate(lead); err != nil {
+		return err
 	}
 
-	categoriesJSON, _ := json.Marshal(entry.Categories)
-	emailsJSON, _ := json.Marshal(entry.Emails)
-
+	// SQL non-destructive UPSERT with exact metrics tracking (GATE 8 & GATE 9)
 	q := `
-	INSERT INTO public.prospect_leads_google (
+	INSERT INTO public.prospect_leads_google AS target (
 		place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country,
 		phone, whatsapp, website, emails, email, review_rating, review_count,
 		latitude, longitude, google_maps_link, job_id, job_name, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
 		$12, $13, $14, $15, $16, $17, $18,
-		$19, $20, $21, $22, $23, NOW()
+		$19, $20, $21, NULLIF($22, ''), NULLIF($23, ''), NOW()
 	)
 	ON CONFLICT (place_id) DO UPDATE SET
-		cid = EXCLUDED.cid,
+		cid = CASE WHEN EXCLUDED.cid IS NOT NULL AND EXCLUDED.cid != '' THEN EXCLUDED.cid ELSE target.cid END,
 		place_name = EXCLUDED.place_name,
 		category = EXCLUDED.category,
 		categories = EXCLUDED.categories,
-		address = EXCLUDED.address,
+		address = CASE WHEN EXCLUDED.address IS NOT NULL AND EXCLUDED.address != '' THEN EXCLUDED.address ELSE target.address END,
 		street = EXCLUDED.street,
 		city = EXCLUDED.city,
 		state = EXCLUDED.state,
 		postal_code = EXCLUDED.postal_code,
 		country = EXCLUDED.country,
-		phone = EXCLUDED.phone,
-		whatsapp = EXCLUDED.whatsapp,
-		website = EXCLUDED.website,
-		emails = EXCLUDED.emails,
-		email = EXCLUDED.email,
+		phone = CASE WHEN EXCLUDED.phone IS NOT NULL AND EXCLUDED.phone != '' THEN EXCLUDED.phone ELSE target.phone END,
+		whatsapp = CASE WHEN EXCLUDED.whatsapp IS NOT NULL AND EXCLUDED.whatsapp != '' THEN EXCLUDED.whatsapp ELSE target.whatsapp END,
+		website = CASE WHEN EXCLUDED.website IS NOT NULL AND EXCLUDED.website != '' THEN EXCLUDED.website ELSE target.website END,
+		emails = CASE WHEN EXCLUDED.emails IS NOT NULL AND EXCLUDED.emails != '[]'::jsonb AND EXCLUDED.emails != 'null'::jsonb THEN EXCLUDED.emails ELSE target.emails END,
+		email = CASE WHEN EXCLUDED.email IS NOT NULL AND EXCLUDED.email != '' THEN EXCLUDED.email ELSE target.email END,
 		review_rating = EXCLUDED.review_rating,
 		review_count = EXCLUDED.review_count,
 		latitude = EXCLUDED.latitude,
 		longitude = EXCLUDED.longitude,
-		google_maps_link = EXCLUDED.google_maps_link,
-		job_id = EXCLUDED.job_id,
-		job_name = EXCLUDED.job_name,
+		google_maps_link = CASE WHEN EXCLUDED.google_maps_link IS NOT NULL AND EXCLUDED.google_maps_link != '' THEN EXCLUDED.google_maps_link ELSE target.google_maps_link END,
+		job_id = COALESCE(NULLIF(EXCLUDED.job_id, ''), target.job_id),
+		job_name = COALESCE(NULLIF(EXCLUDED.job_name, ''), target.job_name),
 		updated_at = NOW()
-	RETURNING (xmax = 0) AS is_inserted;
+	RETURNING 
+		(xmax = 0) AS is_inserted,
+		(
+			target.place_name IS DISTINCT FROM EXCLUDED.place_name OR
+			target.category IS DISTINCT FROM EXCLUDED.category OR
+			target.categories IS DISTINCT FROM EXCLUDED.categories OR
+			(EXCLUDED.address IS NOT NULL AND EXCLUDED.address != '' AND target.address IS DISTINCT FROM EXCLUDED.address) OR
+			(EXCLUDED.phone IS NOT NULL AND EXCLUDED.phone != '' AND target.phone IS DISTINCT FROM EXCLUDED.phone) OR
+			(EXCLUDED.whatsapp IS NOT NULL AND EXCLUDED.whatsapp != '' AND target.whatsapp IS DISTINCT FROM EXCLUDED.whatsapp) OR
+			(EXCLUDED.website IS NOT NULL AND EXCLUDED.website != '' AND target.website IS DISTINCT FROM EXCLUDED.website) OR
+			target.review_rating IS DISTINCT FROM EXCLUDED.review_rating OR
+			target.review_count IS DISTINCT FROM EXCLUDED.review_count
+		) AS is_modified;
 	`
 
-	var isInserted bool
+	var isInserted, isModified bool
 	err := w.pool.QueryRow(ctx, q,
-		placeID,
-		entry.Cid,
-		entry.Title,
-		entry.Category,
-		categoriesJSON,
-		entry.Address,
-		entry.CompleteAddress.Street,
-		entry.CompleteAddress.City,
-		entry.CompleteAddress.State,
-		entry.CompleteAddress.PostalCode,
-		entry.CompleteAddress.Country,
-		entry.Phone,
-		phoneNorm,
-		entry.WebSite,
-		emailsJSON,
-		emailFirst,
-		entry.ReviewRating,
-		entry.ReviewCount,
-		entry.Latitude,
-		entry.Longtitude,
-		entry.Link,
-		entry.ID,
-		entry.Title,
-	).Scan(&isInserted)
+		lead.PlaceID,
+		lead.Cid,
+		lead.PlaceName,
+		lead.Category,
+		lead.CategoriesJSON,
+		lead.Address,
+		lead.Street,
+		lead.City,
+		lead.State,
+		lead.PostalCode,
+		lead.Country,
+		lead.Phone,
+		lead.Whatsapp,
+		lead.Website,
+		lead.EmailsJSON,
+		lead.Email,
+		lead.ReviewRating,
+		lead.ReviewCount,
+		lead.Latitude,
+		lead.Longitude,
+		lead.GoogleMapsLink,
+		lead.JobID,
+		lead.JobName,
+	).Scan(&isInserted, &isModified)
 
 	if err != nil {
 		return err
@@ -399,43 +312,11 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 
 	if isInserted {
 		atomic.AddUint64(&w.metrics.Inserted, 1)
-	} else {
+	} else if isModified {
 		atomic.AddUint64(&w.metrics.Updated, 1)
+	} else {
+		atomic.AddUint64(&w.metrics.Unchanged, 1)
 	}
-
-	// Dual write to legacy leads table for backward compatibility if present
-	qLegacy := `
-	INSERT INTO public.leads (
-		place_id, title, category, categories, address, street, city, state, postal_code, country,
-		phone, phone_normalized, website, emails, email, review_rating, review_count,
-		latitude, longitude, google_maps_link, job_id, job_name, updated_at
-	) VALUES (
-		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-		$11, $12, $13, $14, $15, $16, $17,
-		$18, $19, $20, $21, $22, NOW()
-	)
-	ON CONFLICT (place_id) DO UPDATE SET
-		title = EXCLUDED.title,
-		category = EXCLUDED.category,
-		categories = EXCLUDED.categories,
-		address = EXCLUDED.address,
-		phone = EXCLUDED.phone,
-		phone_normalized = EXCLUDED.phone_normalized,
-		website = EXCLUDED.website,
-		emails = EXCLUDED.emails,
-		review_rating = EXCLUDED.review_rating,
-		review_count = EXCLUDED.review_count,
-		latitude = EXCLUDED.latitude,
-		longitude = EXCLUDED.longitude,
-		updated_at = NOW();
-	`
-	_, _ = w.pool.Exec(ctx, qLegacy,
-		placeID, entry.Title, entry.Category, categoriesJSON, entry.Address,
-		entry.CompleteAddress.Street, entry.CompleteAddress.City, entry.CompleteAddress.State,
-		entry.CompleteAddress.PostalCode, entry.CompleteAddress.Country, entry.Phone,
-		phoneNorm, entry.WebSite, emailsJSON, emailFirst, entry.ReviewRating,
-		entry.ReviewCount, entry.Latitude, entry.Longtitude, entry.Link, entry.ID, entry.Title,
-	)
 
 	return nil
 }

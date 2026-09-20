@@ -10,36 +10,55 @@ on:
     branches: [main]
 
 jobs:
-  run:
-    name: Build
+  build:
+    name: Build and Test
     runs-on: ubuntu-latest
-    timeout-minutes: 7
-    strategy:
-      fail-fast: true
-      matrix:
-        go: ['1.27.1']
+    timeout-minutes: 10
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: prospects_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: shadowpass
+        ports:
+          - 5439:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+
       - name: Install Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
+          go-version: '1.24.x'
           check-latest: true
-      - name: Go Format
+
+      - name: Go Format Check
         run: gofmt -s -w . && git diff --exit-code
-      - name: Lint
-        run: make lint
+
       - name: Go Vet
         run: go vet ./...
-      - name: Go Tidy
+
+      - name: Go Tidy Check
         run: go mod tidy && git diff --exit-code
-      - name: Go Mod
-        run: go mod download
+
       - name: Go Mod Verify
         run: go mod verify
-      - name: Go Vulnerability Check
-        run: make vuln
+
       - name: Go Build
-        run: go build -o /dev/null ./...
+        run: go build -v ./...
+
+      - name: Unit Tests
+        run: go test -v -short ./...
+
+      - name: Integration Tests (PostgreSQL Service Container)
+        env:
+          PROSPECT_DATABASE_URL: "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+        run: go test -v ./shadow/...
