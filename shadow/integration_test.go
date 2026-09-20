@@ -47,7 +47,10 @@ func TestIntegrationScalingProgression(t *testing.T) {
 		t.Skip("Skipping integration test in short unit test run")
 	}
 
-	testDSN := "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

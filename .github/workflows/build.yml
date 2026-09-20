@@ -23,7 +23,7 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: shadowpass
         ports:
-          - 5439:5432
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -60,5 +60,5 @@ jobs:
 
       - name: Integration Tests (PostgreSQL Service Container)
         env:
-          PROSPECT_DATABASE_URL: "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+          PROSPECT_DATABASE_URL: "postgres://postgres:shadowpass@127.0.0.1:5432/prospects_db?sslmode=disable"
         run: go test -v ./shadow/...
