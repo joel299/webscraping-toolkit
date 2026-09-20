@@ -37,7 +37,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	// 1. Create secret file
 	tmpDir := t.TempDir()
 	secretPath := filepath.Join(tmpDir, "prospect_database_url")
-	require.NoError(t, os.WriteFile(secretPath, []byte(testDSN), 0600))
+	require.NoError(t, os.WriteFile(secretPath, []byte(testDSN+"\n"), 0600))
 	t.Setenv("PROSPECT_DATABASE_URL_FILE", secretPath)
 
 	// 2. Initialize Shadow Writer
@@ -46,14 +46,16 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, writer.disabled)
 
-	// Clean table if exists
-	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS leads")
+	// Clean tables if exist
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.leads")
 	require.NoError(t, initSchema(ctx, pool))
 
 	// 3. Test New Lead Insert (INSERTED)
 	entry1 := &gmaps.Entry{
 		ID:          "lead-001",
 		DataID:      "data-001",
+		Cid:         "123456789",
 		Title:       "Hamburgueria Búfalo Beef",
 		Category:    "Hamburgueria",
 		Categories:  []string{"Hamburgueria", "Restaurante"},
@@ -65,7 +67,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 		ReviewCount: 150,
 		Latitude:    -20.4500,
 		Longtitude:  -54.6000,
-		Link:        "https://maps.google.com/?cid=123",
+		Link:        "https://maps.google.com/?cid=123456789",
 	}
 
 	ch := make(chan scrapemate.Result, 1)
@@ -78,10 +80,11 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	assert.Equal(t, uint64(1), m1.Inserted, "First write must increment Inserted metric")
 	assert.Equal(t, uint64(0), m1.Updated)
 
-	// Verify phone normalization and saved values in Postgres
+	// Verify phone normalization and saved values in public.prospect_leads_google
 	var (
-		savedPhoneNorm   string
-		savedTitle       string
+		savedWhatsapp    string
+		savedPlaceName   string
+		savedCid         string
 		savedLeadStatus  string
 		savedPipeline    string
 		savedConverted   bool
@@ -89,13 +92,14 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	)
 
 	err = pool.QueryRow(ctx, `
-		SELECT phone_normalized, title, lead_status, pipeline_stage, converted, do_not_contact
-		FROM leads WHERE place_id = $1
-	`, "data-001").Scan(&savedPhoneNorm, &savedTitle, &savedLeadStatus, &savedPipeline, &savedConverted, &savedDoNotContact)
+		SELECT whatsapp, place_name, cid, lead_status, pipeline_stage, converted, do_not_contact
+		FROM public.prospect_leads_google WHERE place_id = $1
+	`, "data-001").Scan(&savedWhatsapp, &savedPlaceName, &savedCid, &savedLeadStatus, &savedPipeline, &savedConverted, &savedDoNotContact)
 
 	require.NoError(t, err)
-	assert.Equal(t, "5567999998888", savedPhoneNorm, "Phone must be normalized to 55+DDD+Number")
-	assert.Equal(t, "Hamburgueria Búfalo Beef", savedTitle)
+	assert.Equal(t, "5567999998888", savedWhatsapp, "WhatsApp must be normalized to 55+DDD+Number")
+	assert.Equal(t, "Hamburgueria Búfalo Beef", savedPlaceName)
+	assert.Equal(t, "123456789", savedCid)
 	assert.Equal(t, "new", savedLeadStatus)
 	assert.Equal(t, "prospect", savedPipeline)
 	assert.False(t, savedConverted)
@@ -103,7 +107,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 
 	// 4. Update Commercial SDR State in PostgreSQL directly (Simulate SDR team work)
 	_, err = pool.Exec(ctx, `
-		UPDATE leads SET
+		UPDATE public.prospect_leads_google SET
 			lead_status = 'QUALIFIED_SDR',
 			pipeline_stage = 'NEGOTIATION',
 			followup_count = 3,
@@ -117,6 +121,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	entry1Updated := &gmaps.Entry{
 		ID:          "lead-001",
 		DataID:      "data-001",
+		Cid:         "123456789",
 		Title:       "Hamburgueria Búfalo Beef Premium", // Title updated by scraper
 		Category:    "Hamburgueria Gourmet",
 		Categories:  []string{"Hamburgueria Gourmet"},
@@ -128,7 +133,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 		ReviewCount: 180, // Review count updated
 		Latitude:    -20.4500,
 		Longtitude:  -54.6000,
-		Link:        "https://maps.google.com/?cid=123",
+		Link:        "https://maps.google.com/?cid=123456789",
 	}
 
 	ch2 := make(chan scrapemate.Result, 1)
@@ -143,7 +148,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 
 	// 6. Verify Commercial State Preservation (MUST NOT BE OVERWRITTEN)
 	var (
-		checkTitle       string
+		checkPlaceName   string
 		checkRating      float64
 		checkLeadStatus  string
 		checkPipeline    string
@@ -153,13 +158,13 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	)
 
 	err = pool.QueryRow(ctx, `
-		SELECT title, review_rating, lead_status, pipeline_stage, followup_count, converted, do_not_contact
-		FROM leads WHERE place_id = $1
-	`, "data-001").Scan(&checkTitle, &checkRating, &checkLeadStatus, &checkPipeline, &checkFollowup, &checkConverted, &checkDoNotContact)
+		SELECT place_name, review_rating, lead_status, pipeline_stage, followup_count, converted, do_not_contact
+		FROM public.prospect_leads_google WHERE place_id = $1
+	`, "data-001").Scan(&checkPlaceName, &checkRating, &checkLeadStatus, &checkPipeline, &checkFollowup, &checkConverted, &checkDoNotContact)
 
 	require.NoError(t, err)
 	// Scraped enrichment fields updated:
-	assert.Equal(t, "Hamburgueria Búfalo Beef Premium", checkTitle)
+	assert.Equal(t, "Hamburgueria Búfalo Beef Premium", checkPlaceName)
 	assert.Equal(t, 4.9, checkRating)
 
 	// Commercial SDR fields PRESERVED:
