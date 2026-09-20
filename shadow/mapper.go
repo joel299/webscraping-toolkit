@@ -57,10 +57,18 @@ func (m *ProspectLeadMapper) MapToProspectLead(entry *gmaps.Entry, jobID, jobNam
 		return nil
 	}
 
-	// Deterministic Identity Fallback (GATE 7)
-	placeID := entry.DataID
+	phoneNorm := m.normalizer.Normalize(entry.Phone)
+
+	// Deterministic Identity Precedence (PASSO 1):
+	// 1. PlaceID
+	// 2. DataID (technical fallback)
+	// 3. ID
+	// 4. CID
+	// 5. WhatsApp normalizado
+	// 6. Controlled deterministic fallback
+	placeID := entry.PlaceID
 	if placeID == "" {
-		placeID = entry.PlaceID
+		placeID = entry.DataID
 	}
 	if placeID == "" {
 		placeID = entry.ID
@@ -68,14 +76,14 @@ func (m *ProspectLeadMapper) MapToProspectLead(entry *gmaps.Entry, jobID, jobNam
 	if placeID == "" {
 		if entry.Cid != "" {
 			placeID = fmt.Sprintf("cid-%s", entry.Cid)
+		} else if phoneNorm != "" {
+			placeID = fmt.Sprintf("wa-%s", phoneNorm)
 		} else {
 			cleanTitle := strings.TrimSpace(strings.ToLower(entry.Title))
 			cleanAddr := strings.TrimSpace(strings.ToLower(entry.Address))
 			placeID = fmt.Sprintf("hash-%s|%s", cleanTitle, cleanAddr)
 		}
 	}
-
-	phoneNorm := m.normalizer.Normalize(entry.Phone)
 
 	var emailFirst string
 	if len(entry.Emails) > 0 {

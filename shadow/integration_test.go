@@ -244,6 +244,167 @@ func TestIntegrationScalingProgression(t *testing.T) {
 	assert.Equal(t, 20, normPhoneCount, "All 20 phone numbers must be normalized to 55+DDD+Number")
 }
 
+func TestIdentityAndDeduplicationScenarios(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	config, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Skip("Skipping integration test: PostgreSQL container not reachable")
+		return
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil || pool.Ping(ctx) != nil {
+		t.Skip("Skipping integration test: PostgreSQL container ping failed")
+		return
+	}
+	defer pool.Close()
+
+	// 1. Clean & Migrate
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+	require.NoError(t, applyMigrationFiles(ctx, pool))
+
+	writer := NewWriter(pool, 5*time.Second, 10)
+
+	// --- CASO A: CID Collision with different place_id ---
+	leadA1 := &gmaps.Entry{
+		PlaceID:  "AAA",
+		Cid:      "cid-123",
+		Title:    "Hamburgueria Central A",
+		Category: "Hamburgueria",
+		Phone:    "+55 (67) 99999-9999",
+	}
+	require.NoError(t, writer.UpsertLead(ctx, leadA1))
+
+	var countA1 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&countA1))
+	assert.Equal(t, 1, countA1)
+
+	// Recoleta with different place_id (BBB) but SAME CID (cid-123)
+	leadA2 := &gmaps.Entry{
+		PlaceID:  "BBB",
+		Cid:      "cid-123",
+		Title:    "Hamburgueria Central A - Enriched",
+		Category: "Hamburgueria",
+		Phone:    "+55 (67) 99999-9999",
+	}
+	require.NoError(t, writer.UpsertLead(ctx, leadA2))
+
+	var countA2 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&countA2))
+	assert.Equal(t, 1, countA2, "CASO A: Row count must remain 1 after CID collision")
+
+	var canonicalTitleA string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT place_name FROM public.prospect_leads_google WHERE place_id = 'AAA'").Scan(&canonicalTitleA))
+	assert.Equal(t, "Hamburgueria Central A - Enriched", canonicalTitleA, "Canonical place_id AAA must be updated")
+
+	// --- CASO B: WhatsApp Collision with empty CID & different place_id ---
+	leadB1 := &gmaps.Entry{
+		PlaceID:  "CCC",
+		Cid:      "",
+		Title:    "Hamburgueria B",
+		Category: "Hamburgueria",
+		Phone:    "+55 (67) 98888-8888",
+	}
+	require.NoError(t, writer.UpsertLead(ctx, leadB1))
+
+	var countB1 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&countB1))
+	assert.Equal(t, 2, countB1)
+
+	// Recoleta with place_id DDD, empty CID, but SAME WhatsApp (5567988888888)
+	leadB2 := &gmaps.Entry{
+		PlaceID:  "DDD",
+		Cid:      "",
+		Title:    "Hamburgueria B - Updated",
+		Category: "Hamburgueria",
+		Phone:    "+55 (67) 98888-8888",
+	}
+	require.NoError(t, writer.UpsertLead(ctx, leadB2))
+
+	var countB2 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&countB2))
+	assert.Equal(t, 2, countB2, "CASO B: Row count must remain 2 after WhatsApp collision")
+
+	var canonicalTitleB string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT place_name FROM public.prospect_leads_google WHERE place_id = 'CCC'").Scan(&canonicalTitleB))
+	assert.Equal(t, "Hamburgueria B - Updated", canonicalTitleB, "Canonical place_id CCC must be updated")
+
+	// --- CASO C: Exact Same PlaceID and Data -> UNCHANGED ---
+	metricsBeforeC := writer.GetMetrics()
+	require.NoError(t, writer.UpsertLead(ctx, leadB2)) // identical data
+	metricsAfterC := writer.GetMetrics()
+	assert.Equal(t, metricsBeforeC.Unchanged+1, metricsAfterC.Unchanged, "CASO C: Unchanged metric must increment")
+
+	// --- CASO D: Same PlaceID, New Enrichment Data -> UPDATED ---
+	leadB3 := *leadB2
+	leadB3.PlaceID = "CCC"
+	leadB3.ReviewRating = 4.8
+	metricsBeforeD := writer.GetMetrics()
+	require.NoError(t, writer.UpsertLead(ctx, &leadB3))
+	metricsAfterD := writer.GetMetrics()
+	assert.Equal(t, metricsBeforeD.Updated+1, metricsAfterD.Updated, "CASO D: Updated metric must increment")
+
+	// --- CASO E: Empty Enrichment on Recoleta -> Preserved ---
+	_, _ = pool.Exec(ctx, "UPDATE public.prospect_leads_google SET website = 'https://hamburgueriab.com' WHERE place_id = 'CCC'")
+
+	leadB4 := leadB3
+	leadB4.WebSite = "" // Empty on new scrape
+	require.NoError(t, writer.UpsertLead(ctx, &leadB4))
+
+	var preservedWebsite string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT website FROM public.prospect_leads_google WHERE place_id = 'CCC'").Scan(&preservedWebsite))
+	assert.Equal(t, "https://hamburgueriab.com", preservedWebsite, "CASO E: Existing website must be preserved")
+
+	// --- CASO F: SDR Commercial Fields Preserved ---
+	_, err = pool.Exec(ctx, `
+		UPDATE public.prospect_leads_google SET
+			lead_status = 'QUALIFIED_SDR',
+			pipeline_stage = 'NEGOTIATION',
+			followup_count = 3,
+			converted = TRUE,
+			do_not_contact = TRUE,
+			processing_status = 'COMPLETED'
+		WHERE place_id = 'CCC'
+	`)
+	require.NoError(t, err)
+
+	leadB5 := leadB3
+	leadB5.ReviewCount = 150
+	require.NoError(t, writer.UpsertLead(ctx, &leadB5))
+
+	var (
+		statusStr   string
+		stageStr    string
+		followupVal int
+		convBool    bool
+		dncBool     bool
+		procStr     string
+	)
+	err = pool.QueryRow(ctx, `
+		SELECT lead_status, pipeline_stage, followup_count, converted, do_not_contact, processing_status
+		FROM public.prospect_leads_google WHERE place_id = 'CCC'
+	`, ).Scan(&statusStr, &stageStr, &followupVal, &convBool, &dncBool, &procStr)
+
+	require.NoError(t, err)
+	assert.Equal(t, "QUALIFIED_SDR", statusStr, "CASO F: lead_status preserved")
+	assert.Equal(t, "NEGOTIATION", stageStr, "CASO F: pipeline_stage preserved")
+	assert.Equal(t, 3, followupVal, "CASO F: followup_count preserved")
+	assert.True(t, convBool, "CASO F: converted preserved")
+	assert.True(t, dncBool, "CASO F: do_not_contact preserved")
+	assert.Equal(t, "COMPLETED", procStr, "CASO F: processing_status preserved")
+}
+
 func TestShadowFallbackMode(t *testing.T) {
 	badDSN := "postgres://postgres:badpass@127.0.0.1:59999/prospects_db?sslmode=disable"
 	t.Setenv("PROSPECT_DATABASE_URL", badDSN)

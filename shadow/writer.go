@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gosom/scrapemate"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gosom/google-maps-scraper/gmaps"
@@ -228,19 +230,139 @@ func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
 	return w.upsertLead(ctx, entry)
 }
 
-func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
-	if entry == nil {
-		return nil
+// ResolveIdentity resolves an existing record in public.prospect_leads_google in strict priority (PASSO 2):
+// 1. place_id
+// 2. cid (if non-empty)
+// 3. whatsapp (if non-empty)
+func (w *Writer) ResolveIdentity(ctx context.Context, lead *ProspectLead) (string, error) {
+	if lead == nil || w.pool == nil {
+		return "", nil
 	}
 
-	lead := w.mapper.MapToProspectLead(entry, "", "")
-	if err := w.validator.Validate(lead); err != nil {
+	// 1. Lookup by place_id
+	if lead.PlaceID != "" {
+		var existingID string
+		err := w.pool.QueryRow(ctx, "SELECT place_id FROM public.prospect_leads_google WHERE place_id = $1", lead.PlaceID).Scan(&existingID)
+		if err == nil && existingID != "" {
+			return existingID, nil
+		}
+	}
+
+	// 2. Lookup by cid
+	if lead.Cid != "" {
+		var existingID string
+		err := w.pool.QueryRow(ctx, "SELECT place_id FROM public.prospect_leads_google WHERE cid = $1", lead.Cid).Scan(&existingID)
+		if err == nil && existingID != "" {
+			return existingID, nil
+		}
+	}
+
+	// 3. Lookup by whatsapp
+	if lead.Whatsapp != "" {
+		var existingID string
+		err := w.pool.QueryRow(ctx, "SELECT place_id FROM public.prospect_leads_google WHERE whatsapp = $1", lead.Whatsapp).Scan(&existingID)
+		if err == nil && existingID != "" {
+			return existingID, nil
+		}
+	}
+
+	return "", nil
+}
+
+func (w *Writer) updateExistingLead(ctx context.Context, canonicalPlaceID string, lead *ProspectLead) error {
+	q := `
+	WITH old_row AS (
+		SELECT place_id, cid, place_name, category, categories, address, phone, whatsapp, website, review_rating, review_count
+		FROM public.prospect_leads_google
+		WHERE place_id = $1::text
+	),
+	updated AS (
+		UPDATE public.prospect_leads_google AS target SET
+			cid = CASE WHEN $2::text IS NOT NULL AND $2::text != '' THEN $2::text ELSE target.cid END,
+			place_name = $3::text,
+			category = $4::text,
+			categories = $5::jsonb,
+			address = CASE WHEN $6::text IS NOT NULL AND $6::text != '' THEN $6::text ELSE target.address END,
+			street = CASE WHEN $7::text IS NOT NULL AND $7::text != '' THEN $7::text ELSE target.street END,
+			city = CASE WHEN $8::text IS NOT NULL AND $8::text != '' THEN $8::text ELSE target.city END,
+			state = CASE WHEN $9::text IS NOT NULL AND $9::text != '' THEN $9::text ELSE target.state END,
+			postal_code = CASE WHEN $10::text IS NOT NULL AND $10::text != '' THEN $10::text ELSE target.postal_code END,
+			country = CASE WHEN $11::text IS NOT NULL AND $11::text != '' THEN $11::text ELSE target.country END,
+			phone = CASE WHEN $12::text IS NOT NULL AND $12::text != '' THEN $12::text ELSE target.phone END,
+			whatsapp = CASE WHEN $13::text IS NOT NULL AND $13::text != '' THEN $13::text ELSE target.whatsapp END,
+			website = CASE WHEN $14::text IS NOT NULL AND $14::text != '' THEN $14::text ELSE target.website END,
+			emails = CASE WHEN $15::jsonb IS NOT NULL AND $15::jsonb != '[]'::jsonb AND $15::jsonb != 'null'::jsonb THEN $15::jsonb ELSE target.emails END,
+			email = CASE WHEN $16::text IS NOT NULL AND $16::text != '' THEN $16::text ELSE target.email END,
+			review_rating = $17::numeric,
+			review_count = $18::int,
+			latitude = $19::double precision,
+			longitude = $20::double precision,
+			google_maps_link = CASE WHEN $21::text IS NOT NULL AND $21::text != '' THEN $21::text ELSE target.google_maps_link END,
+			job_id = COALESCE(NULLIF($22::text, ''), target.job_id),
+			job_name = COALESCE(NULLIF($23::text, ''), target.job_name),
+			updated_at = NOW()
+		WHERE target.place_id = $1::text
+		RETURNING 1
+	)
+	SELECT 
+		(
+			(old.cid IS DISTINCT FROM $2::text AND $2::text != '') OR
+			old.place_name IS DISTINCT FROM $3::text OR
+			old.category IS DISTINCT FROM $4::text OR
+			old.categories IS DISTINCT FROM $5::jsonb OR
+			(NULLIF($6::text, '') IS NOT NULL AND old.address IS DISTINCT FROM $6::text) OR
+			(NULLIF($12::text, '') IS NOT NULL AND old.phone IS DISTINCT FROM $12::text) OR
+			(NULLIF($13::text, '') IS NOT NULL AND old.whatsapp IS DISTINCT FROM $13::text) OR
+			(NULLIF($14::text, '') IS NOT NULL AND old.website IS DISTINCT FROM $14::text) OR
+			old.review_rating IS DISTINCT FROM $17::numeric OR
+			old.review_count IS DISTINCT FROM $18::int
+		) AS is_modified
+	FROM old_row old;
+	`
+
+	var isModified bool
+	err := w.pool.QueryRow(ctx, q,
+		canonicalPlaceID,
+		lead.Cid,
+		lead.PlaceName,
+		lead.Category,
+		lead.CategoriesJSON,
+		lead.Address,
+		lead.Street,
+		lead.City,
+		lead.State,
+		lead.PostalCode,
+		lead.Country,
+		lead.Phone,
+		lead.Whatsapp,
+		lead.Website,
+		lead.EmailsJSON,
+		lead.Email,
+		lead.ReviewRating,
+		lead.ReviewCount,
+		lead.Latitude,
+		lead.Longitude,
+		lead.GoogleMapsLink,
+		lead.JobID,
+		lead.JobName,
+	).Scan(&isModified)
+
+	if err != nil {
 		return err
 	}
 
-	// SQL non-destructive UPSERT with exact metrics tracking (GATE 8 & GATE 9)
+	if isModified {
+		atomic.AddUint64(&w.metrics.Updated, 1)
+	} else {
+		atomic.AddUint64(&w.metrics.Unchanged, 1)
+	}
+
+	return nil
+}
+
+func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) error {
 	q := `
-	INSERT INTO public.prospect_leads_google AS target (
+	INSERT INTO public.prospect_leads_google (
 		place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country,
 		phone, whatsapp, website, emails, email, review_rating, review_count,
 		latitude, longitude, google_maps_link, job_id, job_name, updated_at
@@ -249,47 +371,8 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 		$12, $13, $14, $15::jsonb, $16, $17, $18,
 		$19, $20, $21, NULLIF($22, ''), NULLIF($23, ''), NOW()
 	)
-	ON CONFLICT (place_id) DO UPDATE SET
-		cid = CASE WHEN EXCLUDED.cid IS NOT NULL AND EXCLUDED.cid != '' THEN EXCLUDED.cid ELSE target.cid END,
-		place_name = EXCLUDED.place_name,
-		category = EXCLUDED.category,
-		categories = EXCLUDED.categories,
-		address = CASE WHEN EXCLUDED.address IS NOT NULL AND EXCLUDED.address != '' THEN EXCLUDED.address ELSE target.address END,
-		street = EXCLUDED.street,
-		city = EXCLUDED.city,
-		state = EXCLUDED.state,
-		postal_code = EXCLUDED.postal_code,
-		country = EXCLUDED.country,
-		phone = CASE WHEN EXCLUDED.phone IS NOT NULL AND EXCLUDED.phone != '' THEN EXCLUDED.phone ELSE target.phone END,
-		whatsapp = CASE WHEN EXCLUDED.whatsapp IS NOT NULL AND EXCLUDED.whatsapp != '' THEN EXCLUDED.whatsapp ELSE target.whatsapp END,
-		website = CASE WHEN EXCLUDED.website IS NOT NULL AND EXCLUDED.website != '' THEN EXCLUDED.website ELSE target.website END,
-		emails = CASE WHEN EXCLUDED.emails IS NOT NULL AND EXCLUDED.emails != '[]'::jsonb AND EXCLUDED.emails != 'null'::jsonb THEN EXCLUDED.emails ELSE target.emails END,
-		email = CASE WHEN EXCLUDED.email IS NOT NULL AND EXCLUDED.email != '' THEN EXCLUDED.email ELSE target.email END,
-		review_rating = EXCLUDED.review_rating,
-		review_count = EXCLUDED.review_count,
-		latitude = EXCLUDED.latitude,
-		longitude = EXCLUDED.longitude,
-		google_maps_link = CASE WHEN EXCLUDED.google_maps_link IS NOT NULL AND EXCLUDED.google_maps_link != '' THEN EXCLUDED.google_maps_link ELSE target.google_maps_link END,
-		job_id = COALESCE(NULLIF(EXCLUDED.job_id, ''), target.job_id),
-		job_name = COALESCE(NULLIF(EXCLUDED.job_name, ''), target.job_name),
-		updated_at = NOW()
-	RETURNING 
-		(xmax::text = '0') AS is_inserted,
-		(
-			target.place_name IS DISTINCT FROM $3 OR
-			target.category IS DISTINCT FROM $4 OR
-			target.categories IS DISTINCT FROM $5::jsonb OR
-			(NULLIF($6, '') IS NOT NULL AND target.address IS DISTINCT FROM $6) OR
-			(NULLIF($12, '') IS NOT NULL AND target.phone IS DISTINCT FROM $12) OR
-			(NULLIF($13, '') IS NOT NULL AND target.whatsapp IS DISTINCT FROM $13) OR
-			(NULLIF($14, '') IS NOT NULL AND target.website IS DISTINCT FROM $14) OR
-			target.review_rating IS DISTINCT FROM $17 OR
-			target.review_count IS DISTINCT FROM $18
-		) AS is_modified;
 	`
-
-	var isInserted, isModified bool
-	err := w.pool.QueryRow(ctx, q,
+	_, err := w.pool.Exec(ctx, q,
 		lead.PlaceID,
 		lead.Cid,
 		lead.PlaceName,
@@ -313,19 +396,46 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 		lead.GoogleMapsLink,
 		lead.JobID,
 		lead.JobName,
-	).Scan(&isInserted, &isModified)
+	)
 
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Concurrency / unique violation recovery (PASSO 3):
+			// Locate existing canonical record and update it instead of failing
+			existingID, resErr := w.ResolveIdentity(ctx, lead)
+			if resErr == nil && existingID != "" {
+				return w.updateExistingLead(ctx, existingID, lead)
+			}
+		}
+		return err
+	}
+
+	atomic.AddUint64(&w.metrics.Inserted, 1)
+	return nil
+}
+
+func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
+	if entry == nil {
+		return nil
+	}
+
+	lead := w.mapper.MapToProspectLead(entry, "", "")
+	if err := w.validator.Validate(lead); err != nil {
+		return err
+	}
+
+	// 1. Resolve identity across place_id, cid, and whatsapp (PASSO 2)
+	existingID, err := w.ResolveIdentity(ctx, lead)
 	if err != nil {
 		return err
 	}
 
-	if isInserted {
-		atomic.AddUint64(&w.metrics.Inserted, 1)
-	} else if isModified {
-		atomic.AddUint64(&w.metrics.Updated, 1)
-	} else {
-		atomic.AddUint64(&w.metrics.Unchanged, 1)
+	if existingID != "" {
+		// Existing canonical lead found: UPDATE without mutating place_id (PASSO 4) or SDR fields (PASSO 5 CASO F)
+		return w.updateExistingLead(ctx, existingID, lead)
 	}
 
-	return nil
+	// 2. fresh lead: INSERT
+	return w.insertLead(ctx, lead)
 }
