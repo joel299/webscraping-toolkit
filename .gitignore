@@ -6,3 +6,10 @@ examples/examples-api/map-outputs
 examples/examples-api/**/__pycache__/
 examples/examples-api/**/*.py[cod]
 gmaps-output
+google-maps-scraper-app
+google-maps-scraper-gru86
+*.log
+.env
+.env.local
+/tmp/prospect_database_url
+
