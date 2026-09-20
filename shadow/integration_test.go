@@ -394,7 +394,7 @@ func TestIdentityAndDeduplicationScenarios(t *testing.T) {
 	err = pool.QueryRow(ctx, `
 		SELECT lead_status, pipeline_stage, followup_count, converted, do_not_contact, processing_status
 		FROM public.prospect_leads_google WHERE place_id = 'CCC'
-	`, ).Scan(&statusStr, &stageStr, &followupVal, &convBool, &dncBool, &procStr)
+	`).Scan(&statusStr, &stageStr, &followupVal, &convBool, &dncBool, &procStr)
 
 	require.NoError(t, err)
 	assert.Equal(t, "QUALIFIED_SDR", statusStr, "CASO F: lead_status preserved")
