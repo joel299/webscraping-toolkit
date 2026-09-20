@@ -15,6 +15,7 @@ import (
 	"github.com/gosom/google-maps-scraper/deduper"
 	"github.com/gosom/google-maps-scraper/exiter"
 	"github.com/gosom/google-maps-scraper/runner"
+	"github.com/gosom/google-maps-scraper/shadow"
 	"github.com/gosom/google-maps-scraper/tlmt"
 	"github.com/gosom/google-maps-scraper/web"
 	"github.com/gosom/google-maps-scraper/web/sqlite"
@@ -302,6 +303,9 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 		csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(writer))
 
 		writers := []scrapemate.ResultWriter{csvWriter}
+		if shadowWriter := shadow.NewWriterFromEnv(); shadowWriter != nil {
+			writers = append(writers, shadowWriter)
+		}
 
 		matecfg, err := scrapemateapp.NewConfig(
 			writers,
