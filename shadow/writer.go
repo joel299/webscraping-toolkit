@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -218,6 +219,7 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 		if err != nil {
 			atomic.AddUint64(&w.metrics.Failed, 1)
 			log.Warn("shadow persistence upsert failed gracefully", "place", entry.Title, "error", err)
+			fmt.Printf("SHADOW_UPSERT_ERROR: place=%s err=%v\n", entry.Title, err)
 		}
 	}
 }
