@@ -1,18 +1,33 @@
-<tr>
-    <td>{{.ID}}</td>
-    <td>{{.Name}}</td>
-    <td>{{.Date}}</td>
+<tr class="job-table-row" data-name="{{.Name}}" data-status="{{.Status}}">
+    <td><strong>{{.Name}}</strong></td>
+    <td>{{.Date.Format "02/01/2006 15:04"}}</td>
     <td>
-        <span class="status-indicator status-{{.Status}}">{{.Status}}</span>
+        {{if or (eq .Status "working") (eq .Status "running")}}
+            <span class="badge badge-working">Buscando empresas</span>
+        {{else if eq .Status "ok"}}
+            <span class="badge badge-ok">Concluído</span>
+        {{else if or (eq .Status "failed") (eq .Status "error")}}
+            <span class="badge badge-error">Erro na pesquisa</span>
+        {{else}}
+            <span class="badge badge-pending">Preparando</span>
+        {{end}}
     </td>
     <td>
-        {{ if eq .Status "ok" }}
-            <a href="/download?id={{.ID}}" download class="button download-button">Download</a>
-        {{ end }}
-        <button hx-delete="/delete?id={{.ID}}" 
-                hx-target="closest tr"
-                hx-swap="outerHTML"
-                hx-confirm="Are you sure you want to delete this job?"
-                class="delete-button">Delete</button>
+        <div class="actions-cell">
+            <button type="button" class="btn btn-sm btn-primary view-button"
+                    hx-get="/view?id={{.ID}}"
+                    hx-target="#map-modal-container"
+                    hx-swap="innerHTML">Ver leads</button>
+            {{ if eq .Status "ok" }}
+                <a href="/download?id={{.ID}}" download class="btn btn-sm btn-outline download-button" title="Baixar CSV de Leads">Baixar CSV</a>
+            {{ end }}
+            <button type="button" hx-delete="/delete?id={{.ID}}"
+                    hx-target="closest tr"
+                    hx-swap="outerHTML"
+                    hx-confirm="Excluir esta pesquisa?&#10;Os resultados armazenados para esta pesquisa serão removidos."
+                    class="btn btn-sm btn-danger delete-button" title="Excluir pesquisa">Excluir</button>
+        </div>
     </td>
 </tr>
+
+

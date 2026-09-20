@@ -1,161 +1,725 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Google Maps Scraper</title>
+    <title>Central de Leads — Prospecção Comercial</title>
     <link rel="stylesheet" href="/static/css/main.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.6/htmx.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/2.0.2/htmx.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
-    <div class="app-container">
-        <header>
-            <h1>Google Maps Scraper</h1>
-            <nav>
-                <a href="/api/docs" target="_blank" rel="noopener noreferrer">API Documentation</a>
-            </nav>
-            <div class="github-section">
-                <p>If you find this tool useful, please consider starring our repository: </p>
-                <a href="https://github.com/gosom/google-maps-scraper" class="github-button">
-                <svg height="16" width="16" viewBox="0 0 16 16">
-                    <path fill="currentColor" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/>
-                  </svg>
-                  Star on GitHub
-                </a>
+    <div id="app-container">
+        <!-- Sidebar Navigation -->
+        <aside id="app-sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-logo">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                    <span>Central de Leads</span>
+                </div>
+                <button type="button" id="sidebar-toggle" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Recolher/Expandir menu">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+                </button>
             </div>
-            <div id="sponsor-section" class="sponsor-section">
-    <button class="sponsor-close" onclick="hideSponsor()">
-        ×
-    </button>
-    <p class="sponsor-text">Support the ongoing maintenance and development of this project by becoming a sponsor. Your contribution helps ensure the tool's continued improvement and reliability.</p>
-    <a href="https://github.com/sponsors/gosom" class="sponsor-button" target="_blank" rel="noopener noreferrer">
-        <svg height="16" width="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-            <path fill-rule="evenodd" clip-rule="evenodd" d="M4.25 2.5C4.25 1.83696 4.67143 1.25 5.25 1.25C5.82857 1.25 6.25 1.83696 6.25 2.5C6.25 3.16304 5.82857 3.75 5.25 3.75C4.67143 3.75 4.25 3.16304 4.25 2.5ZM2.5 3.75C1.92143 3.75 1.5 3.16304 1.5 2.5C1.5 1.83696 1.92143 1.25 2.5 1.25C3.07857 1.25 3.5 1.83696 3.5 2.5C3.5 3.16304 3.07857 3.75 2.5 3.75ZM8 1.25C7.42143 1.25 7 1.83696 7 2.5C7 3.16304 7.42143 3.75 8 3.75C8.57857 3.75 9 3.16304 9 2.5C9 1.83696 8.57857 1.25 8 1.25ZM10.75 2.5C10.75 1.83696 11.1714 1.25 11.75 1.25C12.3286 1.25 12.75 1.83696 12.75 2.5C12.75 3.16304 12.3286 3.75 11.75 3.75C11.1714 3.75 10.75 3.16304 10.75 2.5ZM14.5 1.25C13.9214 1.25 13.5 1.83696 13.5 2.5C13.5 3.16304 13.9214 3.75 14.5 3.75C15.0786 3.75 15.5 3.16304 15.5 2.5C15.5 1.83696 15.0786 1.25 14.5 1.25ZM1.25 5.25C1.25 4.67143 1.83696 4.25 2.5 4.25C3.16304 4.25 3.75 4.67143 3.75 5.25C3.75 5.82857 3.16304 6.25 2.5 6.25C1.83696 6.25 1.25 5.82857 1.25 5.25ZM5.25 4.25C4.67143 4.25 4.25 4.67143 4.25 5.25C4.25 5.82857 4.67143 6.25 5.25 6.25C5.82857 6.25 6.25 5.82857 6.25 5.25C6.25 4.67143 5.82857 4.25 5.25 4.25ZM7 5.25C7 4.67143 7.42143 4.25 8 4.25C8.57857 4.25 9 4.67143 9 5.25C9 5.82857 8.57857 6.25 8 6.25C7.42143 6.25 7 5.82857 7 5.25ZM11.75 4.25C11.1714 4.25 10.75 4.67143 10.75 5.25C10.75 5.82857 11.1714 6.25 11.75 6.25C12.3286 6.25 12.75 5.82857 12.75 5.25C12.75 4.67143 12.3286 4.25 11.75 4.25ZM13.5 5.25C13.5 4.67143 13.9214 4.25 14.5 4.25C15.0786 4.25 15.5 4.67143 15.5 5.25C15.5 5.82857 15.0786 6.25 14.5 6.25C13.9214 6.25 13.5 5.82857 13.5 5.25ZM2.5 7.25C1.83696 7.25 1.25 7.67143 1.25 8.25C1.25 8.82857 1.83696 9.25 2.5 9.25C3.16304 9.25 3.75 8.82857 3.75 8.25C3.75 7.67143 3.16304 7.25 2.5 7.25ZM4.25 8.25C4.25 7.67143 4.67143 7.25 5.25 7.25C5.82857 7.25 6.25 7.67143 6.25 8.25C6.25 8.82857 5.82857 9.25 5.25 9.25C4.67143 9.25 4.25 8.82857 4.25 8.25ZM8 7.25C7.42143 7.25 7 7.67143 7 8.25C7 8.82857 7.42143 9.25 8 9.25C8.57857 9.25 9 8.82857 9 8.25C9 7.67143 8.57857 7.25 8 7.25ZM10.75 8.25C10.75 7.67143 11.1714 7.25 11.75 7.25C12.3286 7.25 12.75 7.67143 12.75 8.25C12.75 8.82857 12.3286 9.25 11.75 9.25C11.1714 9.25 10.75 8.82857 10.75 8.25ZM14.5 7.25C13.9214 7.25 13.5 7.67143 13.5 8.25C13.5 8.82857 13.9214 9.25 14.5 9.25C15.0786 9.25 15.5 8.82857 15.5 8.25C15.5 7.67143 15.0786 7.25 14.5 7.25Z" fill="currentColor"/>
-        </svg>
-        Sponsor on GitHub
-    </a>
-</div>
+            <nav class="sidebar-nav">
+                <div class="nav-item active" id="nav-pesquisas" onclick="switchTab('pesquisas')" title="Pesquisas">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                    <span>Pesquisas</span>
+                </div>
+                <div class="nav-item" id="nav-leads" onclick="switchTab('leads')" title="Leads">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span>Leads</span>
+                </div>
+                <a href="/api/docs" target="_blank" rel="noopener noreferrer" class="nav-item" id="nav-docs" title="Integrações / API">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                    <span>Integrações</span>
+                </a>
+            </nav>
+        </aside>
 
-        </header>
-        <main>
-            <div class="sidebar">
-                <div id="error-container" class="error-message"></div>
-                <form 
+        <!-- Main Workspace Wrapper -->
+        <div id="main-wrapper">
+            <!-- Top Bar (Clean, single header without duplicate topbar button) -->
+            <header id="top-bar">
+                <div class="top-bar-title">
+                    <h1 id="page-title">Pesquisas</h1>
+                    <p id="page-subtitle">Encontre empresas e acompanhe seus resultados de prospecção.</p>
+                </div>
+            </header>
+
+            <!-- Main Content Area -->
+            <main id="content-area">
+                <!-- PESQUISAS VIEW -->
+                <div id="pesquisas-view" class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Minhas Pesquisas</div>
+                        <div class="panel-toolbar">
+                            <div class="search-input-wrap">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                                <input type="text" id="search-input" class="input-search" placeholder="Buscar pesquisas..." oninput="filterTable()">
+                            </div>
+                            <select id="status-filter-select" class="select-filter" onchange="filterTable()">
+                                <option value="">Todos os status</option>
+                                <option value="pending">Preparando</option>
+                                <option value="working">Buscando empresas</option>
+                                <option value="ok">Concluído</option>
+                                <option value="failed">Erro na pesquisa</option>
+                            </select>
+                            <button type="button" class="btn btn-primary btn-sm" onclick="openDrawer()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                Nova busca
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="error-container" style="color: var(--color-danger); padding: 0.75rem 1.5rem; font-size: 0.875rem;"></div>
+                    <div id="spinner" class="spinner"></div>
+
+                    <!-- Permanent Jobs Container -->
+                    <div id="jobs-container">
+                        <div class="table-responsive">
+                            <table id="job-table" class="modern-table">
+                                <thead>
+                                    <tr>
+                                        <th>Pesquisa</th>
+                                        <th>Data</th>
+                                        <th>Status</th>
+                                        <th>Ações</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="job-tbody" hx-get="/jobs" hx-trigger="load" hx-swap="outerHTML">
+                                    <!-- Table content loaded by HTMX -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="pagination-container"></div>
+                    </div>
+                </div>
+
+                <!-- LEADS VIEW (GLOBAL LEADS CONSOLIDATED) -->
+                <div id="leads-view" class="panel" style="display: none;">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            Base Global de Leads 
+                            <span id="global-leads-badge" class="badge badge-primary" style="margin-left: 0.5rem; background: var(--color-primary-light); color: var(--color-primary); font-weight: 600;">Resultados | 0</span>
+                        </div>
+                        <div class="panel-toolbar" style="flex-wrap: wrap; gap: 0.5rem;">
+                            <div class="search-input-wrap">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                                <input type="text" id="global-lead-search" class="input-search" placeholder="Buscar por empresa, segmento, cidade, telefone..." oninput="filterGlobalLeads()">
+                            </div>
+                            <select id="global-job-filter" class="select-filter" onchange="filterGlobalLeads()">
+                                <option value="">Todas as pesquisas</option>
+                            </select>
+                            <select id="global-category-filter" class="select-filter" onchange="filterGlobalLeads()">
+                                <option value="">Todas as categorias</option>
+                            </select>
+                            <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--color-text-muted); cursor: pointer;">
+                                <input type="checkbox" id="global-has-phone" onchange="filterGlobalLeads()"> Com telefone
+                            </label>
+                            <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--color-text-muted); cursor: pointer;">
+                                <input type="checkbox" id="global-has-email" onchange="filterGlobalLeads()"> Com e-mail
+                            </label>
+                        </div>
+                    </div>
+
+                    <div id="global-leads-status" style="padding: 0.5rem 1.5rem; font-size: 0.875rem; color: var(--color-text-muted);">
+                        Carregando empresas encontradas em todas as pesquisas...
+                    </div>
+
+                    <div class="explorer-container" style="height: calc(100vh - 220px); min-height: 500px;">
+                        <div id="job-places-list" style="width: 320px; flex-shrink: 0;">
+                            <div id="global-cards-container" class="places-cards-scroll"></div>
+                        </div>
+                        <div id="global-leads-map" style="flex: 1; border-radius: 8px; border: 1px solid var(--color-border); min-height: 400px;"></div>
+                        <div id="job-details-panel" style="width: 320px; flex-shrink: 0;">
+                            <div id="global-details-empty" class="empty-state" style="padding-top: 3rem;">
+                                <svg width="40" height="40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                <p style="font-size: 0.9rem; color: var(--color-text-muted);">Selecione uma empresa da lista ou do mapa para ver os detalhes comerciais completos.</p>
+                            </div>
+                            <div id="global-details-content" style="display:none;"></div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Footer -->
+            <footer id="app-footer">
+                <div>&copy; Central de Leads — Prospecção Comercial</div>
+                <div class="footer-links">
+                    <a href="/api/docs" target="_blank" rel="noopener noreferrer">Documentação da API</a>
+                </div>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Slide-over Drawer (Nova Pesquisa Simplificada) -->
+    <div id="drawer-backdrop" class="drawer-backdrop" onclick="handleBackdropClick(event)">
+        <div class="drawer-content">
+            <div class="drawer-header">
+                <h2>Nova Busca de Empresas</h2>
+                <button type="button" class="drawer-close-btn" onclick="closeDrawer()">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <form id="scrape-form"
                     hx-post="/scrape" 
                     hx-target="#job-tbody"
                     hx-swap="outerHTML"
                     hx-indicator="#spinner"
-                    hx-on::before-request="document.getElementById('error-container').innerHTML = ''"
-                    hx-on::after-request="if(!event.detail.successful) document.getElementById('error-container').innerHTML = event.detail.xhr.responseText"
+                    hx-on::before-request="prepareFormSubmission(); document.getElementById('error-container').innerHTML = ''; closeDrawer();"
+                    hx-on::after-request="if(!event.detail.successful) { openDrawer(); document.getElementById('error-container').innerHTML = event.detail.xhr.responseText; }"
                 >
-                    
-                    <fieldset>
-                        <legend>Job Details</legend>
-                        <div class="form-group">
-                            <label for="name">Job Name:</label>
-                            <input type="text" id="name" name="name" value="{{.Name}}">
-                        </div>
-                        <div class="form-group">
-                            <label for="keywords">Keywords:</label>
-                            <textarea id="keywords" name="keywords" rows="10">{{ .KeywordsString }}</textarea>
-                        </div>
-                        <div class="form-group">
-                            <label for="lang">Language:</label>
-                            <input type="text" id="lang" name="lang" value="{{.Language}}">
-                        </div>
-                    </fieldset>
-                    
-                    <details class="expandable-section">
-                        <summary>Location Settings</summary>
-                        <fieldset>
-                            <div class="form-group">
-                                <label for="zoom">Zoom:</label>
-                                <input type="number" id="zoom" name="zoom" value="{{.Zoom}}">
-                            </div>
-                            <div class="form-group">
-                                <label for="latitude">Latitude:</label>
-                                <input type="number" step="0.000000000000001" id="latitude" name="latitude" value="{{.Lat}}">
-                            </div>
-                            <div class="form-group">
-                                <label for="longitude">Longitude:</label>
-                                <input type="number" step="0.000000000000001" id="longitude" name="longitude" value="{{.Lon}}">
-                            </div>
-                        </fieldset>
-                    </details>
-                    
-                    <details class="expandable-section">
-                        <summary>Advanced Options</summary>
-                        <fieldset>
-                            <div class="form-group">
-                                <label for="fastmode">Fast Mode (BETA):</label>
-                                <input type="checkbox" id="fastmode" name="fastmode" {{if .FastMode}}checked{{end}}>
-                            </div>
-                            <div class="form-group">
-                                    <label for="radius">Radius (BETA):</label>
-                                    <input type="number" id="radius" name="radius" value="{{.Radius}}">
-                            </div>
-                            <div class="form-group">
-                                <label for="depth">Depth:</label>
-                                <input type="number" step="1" id="depth" name="depth" value="{{.Depth}}">
-                            </div>
-                            <div class="form-group checkbox">
-                                <input type="checkbox" id="email" name="email" {{if .Email}}checked{{end}}>
-                                <label for="email">Fetch Emails</label>
-                            </div>
-                            <div class="form-group">
-                                <label for="maxtime">Max job time:</label>
-                                <input type="text" id="maxtime" name="maxtime" value="{{.MaxTime}}">
-                            </div>
-                        </fieldset>
-                    </details>
-                    <details class="expandable-section">
-                        <summary>Proxies</summary>
-                        <fieldset>
-                            <div class="form-group">
-                                <label for="proxies">Proxies:(one per line)</label>
-                                <p class="text-muted"><small>Examples:<br>
-                                        <p>HTTPS proxy with username/password: https://username:password@myproxy.local:443<p>
-                                        <p>HTTP proxy with username/password: http://username:password@myproxy.local:443<p>
-                                        <p>SOCKS5 proxy without auth: socks5://127.0.0.1:8000</p>
-                                </p>
+                    <!-- Campos Comerciais Simplificados -->
+                    <div class="form-group">
+                        <label for="segment-input">O que você procura?</label>
+                        <input type="text" id="segment-input" required placeholder="ex: Hamburguerias, Escolas de Inglês, Academias">
+                        <div class="field-tip">Digite o segmento ou tipo de empresa desejado.</div>
+                    </div>
 
-                                <textarea id="proxies" name="proxies" rows="5">{{.ProxiesString}}</textarea>
+                    <div class="form-group">
+                        <label for="city-input">Onde?</label>
+                        <input type="text" id="city-input" required placeholder="ex: Campo Grande - MS, São Paulo - SP">
+                        <div class="field-tip">Digite a cidade ou região de busca.</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="quantity-input">Quantidade aproximada de empresas</label>
+                        <select id="quantity-input" class="select-filter" style="width: 100%; height: 38px;">
+                            <option value="50" selected>Até 50 empresas</option>
+                            <option value="100">Até 100 empresas</option>
+                            <option value="200">Até 200 empresas</option>
+                            <option value="500">Até 500 empresas</option>
+                        </select>
+                    </div>
+
+                    <!-- Campos Internos Automatizados (Hidden do usuário comercial) -->
+                    <input type="hidden" id="name" name="name" value="">
+                    <textarea id="keywords" name="keywords" style="display:none;"></textarea>
+                    <input type="hidden" id="lang" name="lang" value="pt">
+                    <input type="hidden" id="depth" name="depth" value="5">
+                    <input type="hidden" id="zoom" name="zoom" value="15">
+                    <input type="hidden" id="radius" name="radius" value="10000">
+                    <input type="hidden" id="latitude" name="latitude" value="0">
+                    <input type="hidden" id="longitude" name="longitude" value="0">
+                    <input type="hidden" id="maxtime" name="maxtime" value="15m">
+
+                    <details class="accordion-section" style="margin-top: 1rem;">
+                        <summary style="font-size: 0.85rem; color: var(--color-text-muted);">Opções avançadas (opcional)</summary>
+                        <div class="accordion-body">
+                            <div class="form-group">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="email" name="email">
+                                    <label for="email" style="margin-bottom:0;">Buscar e-mails nos sites</label>
+                                </div>
                             </div>
-                        </fieldset>
+                            <div class="form-group">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="fastmode" name="fastmode">
+                                    <label for="fastmode" style="margin-bottom:0;">Busca rápida</label>
+                                </div>
+                            </div>
+                        </div>
                     </details>
-                    
-                    <button type="submit">Start Scraping</button>
+
+                    <div class="drawer-footer" style="padding-top: 1rem; border-top: 1px solid var(--color-border); margin-top: 1.5rem;">
+                        <button type="button" class="btn btn-outline" onclick="closeDrawer()">Cancelar</button>
+                        <button type="submit" class="btn btn-primary">Iniciar busca</button>
+                    </div>
                 </form>
             </div>
-            <div class="content">
-                <div id="spinner" class="spinner"></div>
-                <table id="job-table">
-                    <thead>
-                        <tr>
-                            <th>Job ID</th>
-                            <th>Job Name</th>
-                            <th>Job Date</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="job-tbody" hx-get="/jobs" hx-trigger="load" hx-swap="outerHTML">
-                        <!-- Job rows will be inserted here by HTMX -->
-                    </tbody>
-                </table>
-                <div id="pagination-container"></div>
-            </div>
-        </main>
+        </div>
     </div>
 
+    <!-- Permanent Modal Container for Lead Exploration -->
     <div id="map-modal-container"></div>
-<script>
-function hideSponsor() {
-    const sponsorSection = document.getElementById('sponsor-section');
-    if (sponsorSection) {
-        sponsorSection.style.display = 'none';
-    }
-}
-</script>
+
+    <script>
+        function toggleSidebar() {
+            const sidebar = document.getElementById('app-sidebar');
+            if (sidebar) {
+                sidebar.classList.toggle('collapsed');
+            }
+        }
+
+        function openDrawer() {
+            const backdrop = document.getElementById('drawer-backdrop');
+            if (backdrop) {
+                backdrop.classList.add('active');
+            }
+        }
+
+        function closeDrawer() {
+            const backdrop = document.getElementById('drawer-backdrop');
+            if (backdrop) {
+                backdrop.classList.remove('active');
+            }
+        }
+
+        function handleBackdropClick(event) {
+            if (event.target && event.target.id === 'drawer-backdrop') {
+                closeDrawer();
+            }
+        }
+
+        function prepareFormSubmission() {
+            const segment = document.getElementById('segment-input')?.value.trim() || '';
+            const city = document.getElementById('city-input')?.value.trim() || '';
+            const qty = parseInt(document.getElementById('quantity-input')?.value || '50', 10);
+
+            const searchName = segment && city ? `${segment} — ${city}` : (segment || city || 'Nova Busca');
+            const keywordText = segment && city ? `${segment} em ${city}` : searchName;
+
+            const nameEl = document.getElementById('name');
+            const keywordsEl = document.getElementById('keywords');
+            const depthEl = document.getElementById('depth');
+
+            if (nameEl) nameEl.value = searchName;
+            if (keywordsEl) keywordsEl.value = keywordText;
+            if (depthEl) depthEl.value = Math.max(1, Math.ceil(qty / 10));
+        }
+
+        function switchTab(tabName) {
+            const navPesquisas = document.getElementById('nav-pesquisas');
+            const navLeads = document.getElementById('nav-leads');
+            const viewPesquisas = document.getElementById('pesquisas-view');
+            const viewLeads = document.getElementById('leads-view');
+            const pageTitle = document.getElementById('page-title');
+            const pageSubtitle = document.getElementById('page-subtitle');
+
+            if (tabName === 'leads') {
+                if (navPesquisas) navPesquisas.classList.remove('active');
+                if (navLeads) navLeads.classList.add('active');
+                if (viewPesquisas) viewPesquisas.style.display = 'none';
+                if (viewLeads) viewLeads.style.display = 'block';
+                if (pageTitle) pageTitle.textContent = 'Central de Leads';
+                if (pageSubtitle) pageSubtitle.textContent = 'Visão global das empresas encontradas em todas as pesquisas.';
+                
+                loadGlobalLeads();
+            } else {
+                if (navLeads) navLeads.classList.remove('active');
+                if (navPesquisas) navPesquisas.classList.add('active');
+                if (viewLeads) viewLeads.style.display = 'none';
+                if (viewPesquisas) viewPesquisas.style.display = 'block';
+                if (pageTitle) pageTitle.textContent = 'Pesquisas';
+                if (pageSubtitle) pageSubtitle.textContent = 'Encontre empresas e acompanhe seus resultados de prospecção.';
+            }
+        }
+
+        function filterTable() {
+            const searchInput = document.getElementById('search-input');
+            const statusSelect = document.getElementById('status-filter-select');
+            
+            const searchVal = (searchInput ? searchInput.value : '').toLowerCase().trim();
+            const statusVal = (statusSelect ? statusSelect.value : '').trim();
+            
+            const tbody = document.getElementById('job-tbody');
+            if (!tbody) return;
+
+            const rows = tbody.querySelectorAll('tr:not(.empty-state-row):not(.filter-empty-row)');
+            let visibleCount = 0;
+
+            rows.forEach(row => {
+                const nameText = (row.children[0] ? row.children[0].textContent : '').toLowerCase();
+                const statusAttr = (row.getAttribute('data-status') || '').trim();
+                const statusCellText = (row.children[2] ? row.children[2].textContent : '').toLowerCase();
+
+                const matchSearch = !searchVal || nameText.includes(searchVal);
+                let matchStatus = !statusVal;
+
+                if (statusVal) {
+                    if (statusVal === 'pending' && (statusAttr === 'pending' || statusCellText.includes('preparando'))) matchStatus = true;
+                    else if (statusVal === 'working' && (statusAttr === 'working' || statusAttr === 'running' || statusCellText.includes('buscando'))) matchStatus = true;
+                    else if (statusVal === 'ok' && (statusAttr === 'ok' || statusCellText.includes('concluído'))) matchStatus = true;
+                    else if (statusVal === 'failed' && (statusAttr === 'failed' || statusAttr === 'error' || statusCellText.includes('erro'))) matchStatus = true;
+                    else if (statusAttr === statusVal) matchStatus = true;
+                }
+
+                if (matchSearch && matchStatus) {
+                    row.style.display = '';
+                    visibleCount++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+
+            let filterEmptyRow = tbody.querySelector('.filter-empty-row');
+            if (rows.length > 0 && visibleCount === 0) {
+                if (!filterEmptyRow) {
+                    filterEmptyRow = document.createElement('tr');
+                    filterEmptyRow.className = 'filter-empty-row';
+                    filterEmptyRow.innerHTML = `
+                        <td colspan="4" class="empty-state-cell" style="padding: 2rem; text-align: center; color: var(--color-text-muted);">
+                            Nenhuma pesquisa corresponde aos filtros selecionados.
+                        </td>
+                    `;
+                    tbody.appendChild(filterEmptyRow);
+                }
+                filterEmptyRow.style.display = '';
+            } else if (filterEmptyRow) {
+                filterEmptyRow.style.display = 'none';
+            }
+        }
+
+        document.addEventListener('htmx:afterSwap', function(evt) {
+            if (evt.detail && evt.detail.target && evt.detail.target.id === 'job-tbody') {
+                filterTable();
+            }
+        });
+
+        // GLOBAL LEADS ENGINE
+        var globalLeadsData = [];
+        var globalLeadsMap = null;
+        var globalMarkersMap = new Map();
+        var currentSelectedLeadKey = null;
+
+        function isValidPhone(phone) {
+            if (!phone || typeof phone !== 'string') return false;
+            const trimmed = phone.trim();
+            if (trimmed.length === 0) return false;
+            const lower = trimmed.toLowerCase();
+            return lower !== 'null' && lower !== 'undefined' && lower !== 'n/a' && lower !== 'none' && lower !== '-';
+        }
+
+        function isValidEmail(emails) {
+            if (!Array.isArray(emails) || emails.length === 0) return false;
+            return emails.some(e => {
+                if (!e || typeof e !== 'string') return false;
+                const trimmed = e.trim();
+                if (trimmed.length === 0) return false;
+                const lower = trimmed.toLowerCase();
+                return lower !== 'null' && lower !== 'undefined' && lower !== 'n/a' && lower !== 'none' && lower.includes('@');
+            });
+        }
+
+        async function loadGlobalLeads() {
+            const statusEl = document.getElementById('global-leads-status');
+            if (statusEl) statusEl.textContent = 'Carregando empresas encontradas em todas as pesquisas...';
+            
+            try {
+                const res = await fetch('/api/v1/jobs');
+                if (!res.ok) {
+                    if (statusEl) statusEl.textContent = 'Nenhuma pesquisa encontrada.';
+                    updateLeadsBadge(0);
+                    renderGlobalLeadsUI([]);
+                    return;
+                }
+                
+                const data = await res.json();
+                const jobs = Array.isArray(data) ? data : (data.Jobs || []);
+
+                if (jobs.length === 0) {
+                    if (statusEl) statusEl.textContent = 'Nenhuma pesquisa iniciada ainda.';
+                    updateLeadsBadge(0);
+                    renderGlobalLeadsUI([]);
+                    return;
+                }
+
+                // Populate global job filter
+                populateJobFilter(jobs);
+
+                const allPlaces = [];
+                const keySet = new Set();
+                const categories = new Set();
+
+                for (const job of jobs) {
+                    const jobId = job.ID || job.id;
+                    const htmlRes = await fetch('/view?id=' + jobId);
+                    if (!htmlRes.ok) continue;
+                    const htmlText = await htmlRes.text();
+                    
+                    const match = htmlText.match(/var\s+places\s*=\s*(\[[\s\S]*?\]);/);
+                    if (match && match[1]) {
+                        try {
+                            const places = JSON.parse(match[1]);
+                            if (Array.isArray(places)) {
+                                places.forEach(p => {
+                                    p._jobName = job.Name || job.name;
+                                    p._jobID = jobId;
+                                    const key = p.result_key || p.place_id || p.data_id || ((p.title || '') + '|' + (p.address || '')).toLowerCase();
+                                    if (key && !keySet.has(key)) {
+                                        keySet.add(key);
+                                        allPlaces.push(p);
+                                        if (p.category) categories.add(p.category);
+                                    }
+                                });
+                            }
+                        } catch(e) {
+                            console.error('Erro ao processar resultados da pesquisa:', jobId, e);
+                        }
+                    }
+                }
+
+                globalLeadsData = allPlaces;
+                populateCategoryFilter(Array.from(categories).sort());
+
+                filterGlobalLeads();
+            } catch(err) {
+                console.error('Erro ao carregar leads globais:', err);
+                if (statusEl) statusEl.textContent = 'Erro ao carregar leads globais.';
+            }
+        }
+
+        function updateLeadsBadge(count) {
+            const badge = document.getElementById('global-leads-badge');
+            if (badge) badge.textContent = `Resultados | ${count}`;
+        }
+
+        function populateJobFilter(jobs) {
+            const select = document.getElementById('global-job-filter');
+            if (!select) return;
+            const currentVal = select.value;
+            select.innerHTML = '<option value="">Todas as pesquisas</option>';
+            jobs.forEach(job => {
+                const opt = document.createElement('option');
+                opt.value = job.ID || job.id;
+                opt.textContent = job.Name || job.name;
+                select.appendChild(opt);
+            });
+            if (currentVal) select.value = currentVal;
+        }
+
+        function populateCategoryFilter(catList) {
+            const select = document.getElementById('global-category-filter');
+            if (!select) return;
+            const currentVal = select.value;
+            select.innerHTML = '<option value="">Todas as categorias</option>';
+            catList.forEach(cat => {
+                const opt = document.createElement('option');
+                opt.value = cat;
+                opt.textContent = cat;
+                select.appendChild(opt);
+            });
+            if (currentVal) select.value = currentVal;
+        }
+
+        function filterGlobalLeads() {
+            const query = (document.getElementById('global-lead-search')?.value || '').toLowerCase().trim();
+            const selectedJob = (document.getElementById('global-job-filter')?.value || '').trim();
+            const selectedCat = (document.getElementById('global-category-filter')?.value || '').trim();
+            const hasPhone = document.getElementById('global-has-phone')?.checked;
+            const hasEmail = document.getElementById('global-has-email')?.checked;
+
+            const filtered = globalLeadsData.filter(p => {
+                const matchQuery = !query ||
+                    (p.title && p.title.toLowerCase().includes(query)) ||
+                    (p.category && p.category.toLowerCase().includes(query)) ||
+                    (p.address && p.address.toLowerCase().includes(query)) ||
+                    (p.phone && p.phone.toLowerCase().includes(query)) ||
+                    (p.website && p.website.toLowerCase().includes(query)) ||
+                    (p.emails && p.emails.some(e => typeof e === 'string' && e.toLowerCase().includes(query)));
+
+                const matchJob = !selectedJob || p._jobID === selectedJob;
+                const matchCat = !selectedCat || p.category === selectedCat;
+                const matchPhone = !hasPhone || isValidPhone(p.phone);
+                const matchEmail = !hasEmail || isValidEmail(p.emails);
+
+                return matchQuery && matchJob && matchCat && matchPhone && matchEmail;
+            });
+
+            renderGlobalLeadsUI(filtered);
+        }
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.textContent = str == null ? '' : str;
+            return div.innerHTML;
+        }
+
+        function renderGlobalLeadsUI(placesList) {
+            const cardsContainer = document.getElementById('global-cards-container');
+            const statusEl = document.getElementById('global-leads-status');
+            const panelEl = document.getElementById('global-details-content');
+            const emptyEl = document.getElementById('global-details-empty');
+
+            if (!cardsContainer) return;
+
+            // 1. Recalculate and update badge
+            updateLeadsBadge(placesList.length);
+
+            // 2. Recalculate unique job count and update status text
+            const uniqueJobsCount = new Set(placesList.map(p => p._jobID)).size;
+            if (statusEl) {
+                statusEl.textContent = `Total de ${placesList.length} empresa(s) única(s) encontrada(s) em ${uniqueJobsCount} pesquisa(s).`;
+            }
+
+            // 3. Clear Map Markers from Leaflet Map Layer completely
+            if (globalMarkersMap) {
+                globalMarkersMap.forEach(marker => {
+                    if (globalLeadsMap) globalLeadsMap.removeLayer(marker);
+                });
+                globalMarkersMap.clear();
+            }
+
+            cardsContainer.innerHTML = '';
+
+            if (placesList.length === 0) {
+                cardsContainer.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--color-text-muted);">Nenhuma empresa encontrada com esses filtros.</div>';
+                if (panelEl) panelEl.style.display = 'none';
+                if (emptyEl) emptyEl.style.display = 'block';
+                if (globalLeadsMap) globalLeadsMap.setView([0, 0], 2);
+                return;
+            }
+
+            if (!globalLeadsMap && window.L) {
+                globalLeadsMap = L.map('global-leads-map');
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap'
+                }).addTo(globalLeadsMap);
+            }
+
+            const bounds = [];
+
+            placesList.forEach((place, idx) => {
+                place._globalIndex = idx;
+
+                const card = document.createElement('div');
+                card.className = 'place-card';
+                card.id = 'global-place-card-' + idx;
+
+                const html = [];
+                html.push('<div class="place-card-title">' + escapeHtml(place.title) + '</div>');
+                if (place.category) {
+                    html.push('<span class="place-card-category">' + escapeHtml(place.category) + '</span>');
+                }
+                if (place.address) {
+                    html.push('<div class="place-card-address">' + escapeHtml(place.address) + '</div>');
+                }
+                if (place.review_rating) {
+                    html.push('<div style="font-size: 0.8rem; color: #d97706; font-weight: 600; margin-top: 0.25rem;">★ ' + escapeHtml(String(place.review_rating)));
+                    if (place.review_count) {
+                        html.push(' <span style="color: #64748b; font-weight: normal;">(' + escapeHtml(String(place.review_count)) + ' avaliações)</span>');
+                    }
+                    html.push('</div>');
+                }
+
+                html.push('<div class="place-card-badges">');
+                if (isValidEmail(place.emails)) {
+                    html.push('<span class="badge-tag has-email">✉ Email</span>');
+                }
+                if (isValidPhone(place.phone)) {
+                    html.push('<span class="badge-tag">📞 Telefone</span>');
+                }
+                if (place._jobName) {
+                    html.push('<span class="badge-tag" style="background:#e0f2fe; color:#0369a1;">🔍 ' + escapeHtml(place._jobName) + '</span>');
+                }
+                html.push('</div>');
+
+                card.innerHTML = html.join('');
+                card.addEventListener('click', () => selectGlobalLead(place, 'list'));
+                cardsContainer.appendChild(card);
+
+                if (place.latitude && place.longitude && globalLeadsMap) {
+                    const latlng = [place.latitude, place.longitude];
+                    bounds.push(latlng);
+
+                    const marker = L.marker(latlng).bindPopup('<strong>' + escapeHtml(place.title) + '</strong><br>' + escapeHtml(place.address || '')).addTo(globalLeadsMap);
+                    marker.on('click', () => selectGlobalLead(place, 'map'));
+                    globalMarkersMap.set(idx, marker);
+                }
+            });
+
+            if (bounds.length > 0 && globalLeadsMap) {
+                globalLeadsMap.fitBounds(bounds, { padding: [30, 30] });
+            }
+            if (globalLeadsMap) {
+                setTimeout(() => globalLeadsMap.invalidateSize(), 100);
+            }
+
+            // 4. Preserve selection if currently selected lead is still in filtered results
+            let selectedLeadToSet = placesList[0];
+            if (currentSelectedLeadKey) {
+                const found = placesList.find(p => {
+                    const key = p.result_key || p.place_id || p.data_id || ((p.title || '') + '|' + (p.address || '')).toLowerCase();
+                    return key === currentSelectedLeadKey;
+                });
+                if (found) {
+                    selectedLeadToSet = found;
+                }
+            }
+            selectGlobalLead(selectedLeadToSet, 'init');
+        }
+
+        function selectGlobalLead(place, source) {
+            if (!place) return;
+            currentSelectedLeadKey = place.result_key || place.place_id || place.data_id || ((place.title || '') + '|' + (place.address || '')).toLowerCase();
+
+            document.querySelectorAll('#global-cards-container .place-card').forEach(el => el.classList.remove('active'));
+            const cardEl = document.getElementById('global-place-card-' + place._globalIndex);
+            if (cardEl) {
+                cardEl.classList.add('active');
+                if (source === 'map') {
+                    cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }
+
+            if (place.latitude && place.longitude && globalLeadsMap) {
+                if (source === 'list') {
+                    globalLeadsMap.setView([place.latitude, place.longitude], 16);
+                }
+                const marker = globalMarkersMap.get(place._globalIndex);
+                if (marker) marker.openPopup();
+            }
+
+            renderGlobalLeadDetails(place);
+        }
+
+        function renderGlobalLeadDetails(place) {
+            const panelEl = document.getElementById('global-details-content');
+            const emptyEl = document.getElementById('global-details-empty');
+            if (!panelEl) return;
+
+            emptyEl.style.display = 'none';
+            panelEl.style.display = 'block';
+
+            const html = [];
+            html.push('<h3 class="details-title">' + escapeHtml(place.title) + '</h3>');
+            if (place.category) {
+                html.push('<span class="place-card-category" style="margin-bottom: 0.75rem;">' + escapeHtml(place.category) + '</span>');
+            }
+            if (place.review_rating) {
+                html.push('<div style="font-size: 0.9rem; color: #d97706; font-weight: 600; margin-bottom: 0.85rem;">★ ' + escapeHtml(String(place.review_rating)));
+                if (place.review_count) {
+                    html.push(' <span style="color: #64748b; font-weight: normal;">(' + escapeHtml(String(place.review_count)) + ' avaliações)</span>');
+                }
+                html.push('</div>');
+            }
+
+            html.push('<div class="details-actions">');
+            if (place.website) {
+                const webUrl = place.website.startsWith('http') ? place.website : 'http://' + place.website;
+                html.push('<a href="' + encodeURI(webUrl) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline">🌐 Website</a>');
+            }
+            if (place.link && /^https?:\/\//i.test(place.link)) {
+                html.push('<a href="' + encodeURI(place.link) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline">📍 Google Maps</a>');
+            }
+            html.push('</div>');
+
+            html.push('<div class="details-section">');
+            html.push('<h4>Informações de Contato</h4>');
+            if (isValidPhone(place.phone)) {
+                html.push('<div style="margin-bottom:0.35rem;"><strong>Telefone / WhatsApp:</strong> <a href="tel:' + escapeHtml(place.phone) + '">' + escapeHtml(place.phone) + '</a></div>');
+            }
+            if (isValidEmail(place.emails)) {
+                html.push('<div style="margin-bottom:0.35rem;"><strong>E-mails:</strong> ');
+                place.emails.forEach(em => {
+                    if (typeof em === 'string' && em.trim().length > 0) {
+                        html.push('<a href="mailto:' + escapeHtml(em) + '" class="badge-tag has-email">' + escapeHtml(em) + '</a> ');
+                    }
+                });
+                html.push('</div>');
+            }
+            if (place.address) {
+                html.push('<div style="margin-bottom:0.35rem;"><strong>Endereço:</strong> ' + escapeHtml(place.address) + '</div>');
+            }
+            if (place._jobName) {
+                html.push('<div style="margin-bottom:0.35rem;"><strong>Pesquisa de Origem:</strong> ' + escapeHtml(place._jobName) + '</div>');
+            }
+            html.push('</div>');
+
+            panelEl.innerHTML = html.join('');
+        }
+    </script>
 </body>
 </html>
