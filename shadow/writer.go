@@ -184,8 +184,15 @@ func (w *Writer) Run(ctx context.Context, in <-chan scrapemate.Result) error {
 				return nil
 			}
 
-			entry, ok := result.Data.(*gmaps.Entry)
-			if !ok || entry == nil || entry.Title == "" {
+			var entry *gmaps.Entry
+			switch v := result.Data.(type) {
+			case *gmaps.Entry:
+				entry = v
+			case gmaps.Entry:
+				entry = &v
+			}
+
+			if entry == nil || entry.Title == "" {
 				continue
 			}
 
