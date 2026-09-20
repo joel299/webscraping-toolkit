@@ -272,7 +272,7 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 		job_name = COALESCE(NULLIF(EXCLUDED.job_name, ''), target.job_name),
 		updated_at = NOW()
 	RETURNING 
-		(xmax = 0) AS is_inserted,
+		(xmax::text = '0') AS is_inserted,
 		(
 			target.place_name IS DISTINCT FROM EXCLUDED.place_name OR
 			target.category IS DISTINCT FROM EXCLUDED.category OR
