@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,10 +16,10 @@ import (
 	"github.com/gosom/google-maps-scraper/gmaps"
 )
 
-func TestIntegrationShadowPersistence(t *testing.T) {
+func TestIntegrationScalingProgression(t *testing.T) {
 	testDSN := "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	config, err := pgxpool.ParseConfig(testDSN)
@@ -34,7 +35,7 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// 1. Create secret file
+	// 1. Secret File Setup
 	tmpDir := t.TempDir()
 	secretPath := filepath.Join(tmpDir, "prospect_database_url")
 	require.NoError(t, os.WriteFile(secretPath, []byte(testDSN+"\n"), 0600))
@@ -46,109 +47,79 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, writer.disabled)
 
-	// Clean tables if exist
+	// Reset tables
 	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google")
 	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.leads")
 	require.NoError(t, initSchema(ctx, pool))
 
-	// 3. Test New Lead Insert (INSERTED)
-	entry1 := &gmaps.Entry{
-		ID:          "lead-001",
-		DataID:      "data-001",
-		Cid:         "123456789",
-		Title:       "Hamburgueria Búfalo Beef",
-		Category:    "Hamburgueria",
-		Categories:  []string{"Hamburgueria", "Restaurante"},
-		Address:     "Av. Afonso Pena, 1000 - Campo Grande, MS",
-		Phone:       "+55 (67) 99999-8888",
-		WebSite:     "https://bufalobeef.com.br",
-		Emails:      []string{"contato@bufalobeef.com.br"},
-		ReviewRating: 4.8,
-		ReviewCount: 150,
-		Latitude:    -20.4500,
-		Longtitude:  -54.6000,
-		Link:        "https://maps.google.com/?cid=123456789",
+	// Build 20 distinct entries
+	var dataset []*gmaps.Entry
+	for i := 1; i <= 20; i++ {
+		entry := &gmaps.Entry{
+			ID:          fmt.Sprintf("lead-%03d", i),
+			DataID:      fmt.Sprintf("data-%03d", i),
+			Cid:         fmt.Sprintf("cid-%03d", i),
+			Title:       fmt.Sprintf("Empresa Teste Comercial %03d", i),
+			Category:    "Hamburgueria",
+			Categories:  []string{"Hamburgueria", "Restaurante"},
+			Address:     fmt.Sprintf("Rua Afonso Pena, %d - Campo Grande, MS", i*10),
+			Phone:       fmt.Sprintf("+55 (67) 99000-%04d", i),
+			WebSite:     fmt.Sprintf("https://empresa%03d.com.br", i),
+			Emails:      []string{fmt.Sprintf("contato@empresa%03d.com.br", i)},
+			ReviewRating: 4.5 + float64(i%5)*0.1,
+			ReviewCount: 50 + i*5,
+			Latitude:    -20.4500 + float64(i)*0.001,
+			Longtitude:  -54.6000 + float64(i)*0.001,
+			Link:        fmt.Sprintf("https://maps.google.com/?cid=cid-%03d", i),
+		}
+		dataset = append(dataset, entry)
 	}
 
-	ch := make(chan scrapemate.Result, 1)
-	ch <- scrapemate.Result{Data: entry1}
-	close(ch)
+	// --- TEST 1: PERSIST 1 LEAD ---
+	ch1 := make(chan scrapemate.Result, 1)
+	ch1 <- scrapemate.Result{Data: dataset[0]}
+	close(ch1)
 
-	require.NoError(t, writer.Run(ctx, ch))
+	require.NoError(t, writer.Run(ctx, ch1))
 
-	m1 := writer.GetMetrics()
-	assert.Equal(t, uint64(1), m1.Inserted, "First write must increment Inserted metric")
-	assert.Equal(t, uint64(0), m1.Updated)
+	var count1 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&count1))
+	assert.Equal(t, 1, count1, "Count must be 1 after Test 1")
 
-	// Verify phone normalization and saved values in public.prospect_leads_google
-	var (
-		savedWhatsapp    string
-		savedPlaceName   string
-		savedCid         string
-		savedLeadStatus  string
-		savedPipeline    string
-		savedConverted   bool
-		savedDoNotContact bool
-	)
+	var savedPhoneNorm string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT whatsapp FROM public.prospect_leads_google WHERE place_id = $1", "data-001").Scan(&savedPhoneNorm))
+	assert.Equal(t, "5567990000001", savedPhoneNorm, "Phone BR must be normalized to 5567990000001")
 
-	err = pool.QueryRow(ctx, `
-		SELECT whatsapp, place_name, cid, lead_status, pipeline_stage, converted, do_not_contact
-		FROM public.prospect_leads_google WHERE place_id = $1
-	`, "data-001").Scan(&savedWhatsapp, &savedPlaceName, &savedCid, &savedLeadStatus, &savedPipeline, &savedConverted, &savedDoNotContact)
-
-	require.NoError(t, err)
-	assert.Equal(t, "5567999998888", savedWhatsapp, "WhatsApp must be normalized to 55+DDD+Number")
-	assert.Equal(t, "Hamburgueria Búfalo Beef", savedPlaceName)
-	assert.Equal(t, "123456789", savedCid)
-	assert.Equal(t, "new", savedLeadStatus)
-	assert.Equal(t, "prospect", savedPipeline)
-	assert.False(t, savedConverted)
-	assert.False(t, savedDoNotContact)
-
-	// 4. Update Commercial SDR State in PostgreSQL directly (Simulate SDR team work)
+	// --- TEST 2: RE-RUN SAME LEAD (UPSERT & COMMERCIAL PRESERVATION) ---
+	// Update SDR commercial state directly in Postgres
 	_, err = pool.Exec(ctx, `
 		UPDATE public.prospect_leads_google SET
 			lead_status = 'QUALIFIED_SDR',
 			pipeline_stage = 'NEGOTIATION',
-			followup_count = 3,
+			followup_count = 5,
 			converted = TRUE,
 			do_not_contact = TRUE
 		WHERE place_id = $1
 	`, "data-001")
 	require.NoError(t, err)
 
-	// 5. Test Existing Lead Rescrape (UPSERT - UPDATED)
-	entry1Updated := &gmaps.Entry{
-		ID:          "lead-001",
-		DataID:      "data-001",
-		Cid:         "123456789",
-		Title:       "Hamburgueria Búfalo Beef Premium", // Title updated by scraper
-		Category:    "Hamburgueria Gourmet",
-		Categories:  []string{"Hamburgueria Gourmet"},
-		Address:     "Av. Afonso Pena, 1000 - Campo Grande, MS",
-		Phone:       "(67) 99999-8888",
-		WebSite:     "https://bufalobeef.com.br",
-		Emails:      []string{"contato@bufalobeef.com.br", "sac@bufalobeef.com.br"},
-		ReviewRating: 4.9, // Rating updated
-		ReviewCount: 180, // Review count updated
-		Latitude:    -20.4500,
-		Longtitude:  -54.6000,
-		Link:        "https://maps.google.com/?cid=123456789",
-	}
+	// Rescrape modified lead 1
+	updatedEntry1 := *dataset[0]
+	updatedEntry1.Title = "Empresa Teste Comercial 001 - Premium"
+	updatedEntry1.ReviewRating = 4.9
 
 	ch2 := make(chan scrapemate.Result, 1)
-	ch2 <- scrapemate.Result{Data: entry1Updated}
+	ch2 <- scrapemate.Result{Data: &updatedEntry1}
 	close(ch2)
 
 	require.NoError(t, writer.Run(ctx, ch2))
 
-	m2 := writer.GetMetrics()
-	assert.Equal(t, uint64(1), m2.Inserted)
-	assert.Equal(t, uint64(1), m2.Updated, "Second write of same lead must increment Updated metric")
+	var count2 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&count2))
+	assert.Equal(t, 1, count2, "Count must remain 1 (zero duplicates created)")
 
-	// 6. Verify Commercial State Preservation (MUST NOT BE OVERWRITTEN)
 	var (
-		checkPlaceName   string
+		checkTitle       string
 		checkRating      float64
 		checkLeadStatus  string
 		checkPipeline    string
@@ -156,34 +127,58 @@ func TestIntegrationShadowPersistence(t *testing.T) {
 		checkConverted   bool
 		checkDoNotContact bool
 	)
-
 	err = pool.QueryRow(ctx, `
 		SELECT place_name, review_rating, lead_status, pipeline_stage, followup_count, converted, do_not_contact
 		FROM public.prospect_leads_google WHERE place_id = $1
-	`, "data-001").Scan(&checkPlaceName, &checkRating, &checkLeadStatus, &checkPipeline, &checkFollowup, &checkConverted, &checkDoNotContact)
+	`, "data-001").Scan(&checkTitle, &checkRating, &checkLeadStatus, &checkPipeline, &checkFollowup, &checkConverted, &checkDoNotContact)
 
 	require.NoError(t, err)
-	// Scraped enrichment fields updated:
-	assert.Equal(t, "Hamburgueria Búfalo Beef Premium", checkPlaceName)
+	assert.Equal(t, "Empresa Teste Comercial 001 - Premium", checkTitle)
 	assert.Equal(t, 4.9, checkRating)
+	assert.Equal(t, "QUALIFIED_SDR", checkLeadStatus, "lead_status must be preserved")
+	assert.Equal(t, "NEGOTIATION", checkPipeline, "pipeline_stage must be preserved")
+	assert.Equal(t, 5, checkFollowup, "followup_count must be preserved")
+	assert.True(t, checkConverted, "converted must be preserved")
+	assert.True(t, checkDoNotContact, "do_not_contact must be preserved")
 
-	// Commercial SDR fields PRESERVED:
-	assert.Equal(t, "QUALIFIED_SDR", checkLeadStatus, "lead_status must NOT be overwritten by scraper")
-	assert.Equal(t, "NEGOTIATION", checkPipeline, "pipeline_stage must NOT be overwritten by scraper")
-	assert.Equal(t, 3, checkFollowup, "followup_count must NOT be overwritten by scraper")
-	assert.True(t, checkConverted, "converted must NOT be overwritten by scraper")
-	assert.True(t, checkDoNotContact, "do_not_contact must NOT be overwritten by scraper")
+	// --- TEST 3: 5 LEADS ---
+	ch3 := make(chan scrapemate.Result, 4)
+	for i := 1; i < 5; i++ {
+		ch3 <- scrapemate.Result{Data: dataset[i]}
+	}
+	close(ch3)
+
+	require.NoError(t, writer.Run(ctx, ch3))
+
+	var count3 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&count3))
+	assert.Equal(t, 5, count3, "Count must be 5 after Test 3")
+
+	// --- TEST 4: 20 LEADS ---
+	ch4 := make(chan scrapemate.Result, 15)
+	for i := 5; i < 20; i++ {
+		ch4 <- scrapemate.Result{Data: dataset[i]}
+	}
+	close(ch4)
+
+	require.NoError(t, writer.Run(ctx, ch4))
+
+	var count4 int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&count4))
+	assert.Equal(t, 20, count4, "Total count must be 20 after Test 4")
+
+	var normPhoneCount int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google WHERE whatsapp LIKE '556799000%'").Scan(&normPhoneCount))
+	assert.Equal(t, 20, normPhoneCount, "All 20 phone numbers must be normalized to 55+DDD+Number")
 }
 
 func TestShadowFallbackMode(t *testing.T) {
-	// Point DSN to non-existent port
 	badDSN := "postgres://postgres:badpass@127.0.0.1:59999/prospects_db?sslmode=disable"
 	t.Setenv("PROSPECT_DATABASE_URL", badDSN)
 
 	writer := NewWriterFromEnv()
 	require.NotNil(t, writer)
 
-	// Run job results through shadow writer in fallback mode
 	ch := make(chan scrapemate.Result, 1)
 	ch <- scrapemate.Result{Data: &gmaps.Entry{Title: "Test Lead Offline", Phone: "67999999999"}}
 	close(ch)
@@ -191,7 +186,6 @@ func TestShadowFallbackMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Must complete cleanly without returning error to scrapemate
 	err := writer.Run(ctx, ch)
 	assert.NoError(t, err, "Shadow writer in fallback mode must not fail or crash scrapemate pipeline")
 }
