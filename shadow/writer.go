@@ -276,15 +276,15 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 	RETURNING 
 		(xmax::text = '0') AS is_inserted,
 		(
-			target.place_name IS DISTINCT FROM EXCLUDED.place_name OR
-			target.category IS DISTINCT FROM EXCLUDED.category OR
-			target.categories IS DISTINCT FROM EXCLUDED.categories OR
-			(EXCLUDED.address IS NOT NULL AND EXCLUDED.address != '' AND target.address IS DISTINCT FROM EXCLUDED.address) OR
-			(EXCLUDED.phone IS NOT NULL AND EXCLUDED.phone != '' AND target.phone IS DISTINCT FROM EXCLUDED.phone) OR
-			(EXCLUDED.whatsapp IS NOT NULL AND EXCLUDED.whatsapp != '' AND target.whatsapp IS DISTINCT FROM EXCLUDED.whatsapp) OR
-			(EXCLUDED.website IS NOT NULL AND EXCLUDED.website != '' AND target.website IS DISTINCT FROM EXCLUDED.website) OR
-			target.review_rating IS DISTINCT FROM EXCLUDED.review_rating OR
-			target.review_count IS DISTINCT FROM EXCLUDED.review_count
+			target.place_name IS DISTINCT FROM $3 OR
+			target.category IS DISTINCT FROM $4 OR
+			target.categories IS DISTINCT FROM $5::jsonb OR
+			(NULLIF($6, '') IS NOT NULL AND target.address IS DISTINCT FROM $6) OR
+			(NULLIF($12, '') IS NOT NULL AND target.phone IS DISTINCT FROM $12) OR
+			(NULLIF($13, '') IS NOT NULL AND target.whatsapp IS DISTINCT FROM $13) OR
+			(NULLIF($14, '') IS NOT NULL AND target.website IS DISTINCT FROM $14) OR
+			target.review_rating IS DISTINCT FROM $17 OR
+			target.review_count IS DISTINCT FROM $18
 		) AS is_modified;
 	`
 
