@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gosom/scrapemate"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -51,11 +52,25 @@ func LoadDSN() string {
 	return ""
 }
 
+type SearchContext struct {
+	SearchID       string `json:"search_id"`
+	JobID          string `json:"job_id"`
+	JobName        string `json:"job_name"`
+	Query          string `json:"query"`
+	Location       string `json:"location"`
+	Category       string `json:"category"`
+	RequestedLimit int    `json:"requested_limit"`
+}
+
 type Metrics struct {
-	Inserted  uint64 `json:"inserted"`
-	Updated   uint64 `json:"updated"`
-	Unchanged uint64 `json:"unchanged"`
-	Failed    uint64 `json:"failed"`
+	Inserted                 uint64 `json:"inserted"`
+	Updated                  uint64 `json:"updated"`
+	Unchanged                uint64 `json:"unchanged"`
+	Failed                   uint64 `json:"failed"`
+	SearchesCreated          uint64 `json:"searches_created"`
+	SearchLeadLinksInserted  uint64 `json:"search_lead_links_inserted"`
+	SearchLeadLinksUnchanged uint64 `json:"search_lead_links_unchanged"`
+	ProvenanceFailed         uint64 `json:"provenance_failed"`
 }
 
 type Writer struct {
@@ -67,6 +82,16 @@ type Writer struct {
 	disabled     bool
 	mapper       *ProspectLeadMapper
 	validator    *ProspectLeadValidator
+	jobID        string
+	jobName      string
+}
+
+// SetJobContext sets the search/job provenance context for results written by this Writer instance.
+func (w *Writer) SetJobContext(jobID, jobName string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.jobID = jobID
+	w.jobName = jobName
 }
 
 // NewWriterFromEnv initializes the persistence writer using environment credentials.
@@ -150,11 +175,126 @@ func NewWriter(pool *pgxpool.Pool, saveInterval time.Duration, batchSize int) *W
 
 func (w *Writer) GetMetrics() Metrics {
 	return Metrics{
-		Inserted:  atomic.LoadUint64(&w.metrics.Inserted),
-		Updated:   atomic.LoadUint64(&w.metrics.Updated),
-		Unchanged: atomic.LoadUint64(&w.metrics.Unchanged),
-		Failed:    atomic.LoadUint64(&w.metrics.Failed),
+		Inserted:                 atomic.LoadUint64(&w.metrics.Inserted),
+		Updated:                  atomic.LoadUint64(&w.metrics.Updated),
+		Unchanged:                atomic.LoadUint64(&w.metrics.Unchanged),
+		Failed:                   atomic.LoadUint64(&w.metrics.Failed),
+		SearchesCreated:          atomic.LoadUint64(&w.metrics.SearchesCreated),
+		SearchLeadLinksInserted:  atomic.LoadUint64(&w.metrics.SearchLeadLinksInserted),
+		SearchLeadLinksUnchanged: atomic.LoadUint64(&w.metrics.SearchLeadLinksUnchanged),
+		ProvenanceFailed:         atomic.LoadUint64(&w.metrics.ProvenanceFailed),
 	}
+}
+
+// RegisterSearch registers or updates a search in public.prospect_searches (FASE 6)
+func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
+	if s == nil || w.pool == nil || w.disabled {
+		return nil
+	}
+
+	q := `
+	INSERT INTO public.prospect_searches (
+		search_id, job_id, job_name, query, location, category, requested_limit, status, started_at, updated_at
+	) VALUES (
+		$1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW()
+	)
+	ON CONFLICT (search_id) DO UPDATE SET
+		job_id = EXCLUDED.job_id,
+		job_name = EXCLUDED.job_name,
+		query = EXCLUDED.query,
+		location = EXCLUDED.location,
+		category = EXCLUDED.category,
+		requested_limit = EXCLUDED.requested_limit,
+		status = 'running',
+		updated_at = NOW()
+	`
+
+	_, err := w.pool.Exec(ctx, q,
+		s.SearchID,
+		s.JobID,
+		s.JobName,
+		s.Query,
+		s.Location,
+		s.Category,
+		s.RequestedLimit,
+	)
+
+	if err != nil {
+		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+		log.Warn("shadow persistence register search failed", "search_id", s.SearchID, "error", err)
+		return err
+	}
+
+	atomic.AddUint64(&w.metrics.SearchesCreated, 1)
+	return nil
+}
+
+// UpdateSearchStatus updates status and completion time in public.prospect_searches (FASE 9)
+func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMsg string) error {
+	if searchID == "" || w.pool == nil || w.disabled {
+		return nil
+	}
+
+	var completedAt *time.Time
+	if status == "completed" || status == "failed" {
+		now := time.Now().UTC()
+		completedAt = &now
+	}
+
+	q := `
+	UPDATE public.prospect_searches SET
+		status = $2,
+		error_message = NULLIF($3, ''),
+		completed_at = COALESCE($4, completed_at),
+		updated_at = NOW()
+	WHERE search_id = $1
+	`
+
+	_, err := w.pool.Exec(ctx, q, searchID, status, errMsg, completedAt)
+	if err != nil {
+		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+		log.Warn("shadow persistence update search status failed", "search_id", searchID, "error", err)
+		return err
+	}
+
+	return nil
+}
+
+// LinkLeadToSearch connects a canonical lead to a search request in public.prospect_search_leads (FASE 7)
+func (w *Writer) LinkLeadToSearch(ctx context.Context, searchID, placeID string, resultOrder int) error {
+	if searchID == "" || placeID == "" || w.pool == nil || w.disabled {
+		return nil
+	}
+
+	q := `
+	INSERT INTO public.prospect_search_leads (
+		search_id, place_id, result_order, discovered_at, created_at
+	) VALUES (
+		$1, $2, $3, NOW(), NOW()
+	)
+	ON CONFLICT (search_id, place_id) DO NOTHING
+	RETURNING (xmax::text = '0') AS is_inserted;
+	`
+
+	var isInserted bool
+	err := w.pool.QueryRow(ctx, q, searchID, placeID, resultOrder).Scan(&isInserted)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			atomic.AddUint64(&w.metrics.SearchLeadLinksUnchanged, 1)
+			return nil
+		}
+		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+		log.Warn("shadow persistence link lead to search failed", "search_id", searchID, "place_id", placeID, "error", err)
+		return err
+	}
+
+	if isInserted {
+		atomic.AddUint64(&w.metrics.SearchLeadLinksInserted, 1)
+	} else {
+		atomic.AddUint64(&w.metrics.SearchLeadLinksUnchanged, 1)
+	}
+
+	return nil
 }
 
 func (w *Writer) Run(ctx context.Context, in <-chan scrapemate.Result) error {
@@ -217,17 +357,13 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 	defer cancel()
 
 	for _, entry := range entries {
-		err := w.upsertLead(saveCtx, entry)
+		err := w.upsertLeadWithContext(saveCtx, entry, "", "")
 		if err != nil {
 			atomic.AddUint64(&w.metrics.Failed, 1)
 			log.Warn("shadow persistence upsert failed gracefully", "place", entry.Title, "error", err)
 			fmt.Printf("SHADOW_UPSERT_ERROR: place=%s err=%v\n", entry.Title, err)
 		}
 	}
-}
-
-func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
-	return w.upsertLead(ctx, entry)
 }
 
 // ResolveIdentity resolves an existing record in public.prospect_leads_google in strict priority (PASSO 2):
@@ -415,27 +551,61 @@ func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) error {
 	return nil
 }
 
+func (w *Writer) UpsertLead(ctx context.Context, entry *gmaps.Entry) error {
+	return w.upsertLeadWithContext(ctx, entry, "", "")
+}
+
+func (w *Writer) UpsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) error {
+	return w.upsertLeadWithContext(ctx, entry, jobID, jobName)
+}
+
 func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
+	return w.upsertLeadWithContext(ctx, entry, "", "")
+}
+
+func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) error {
 	if entry == nil {
 		return nil
 	}
 
-	lead := w.mapper.MapToProspectLead(entry, "", "")
+	w.mu.Lock()
+	if jobID == "" {
+		jobID = w.jobID
+	}
+	if jobName == "" {
+		jobName = w.jobName
+	}
+	w.mu.Unlock()
+
+	lead := w.mapper.MapToProspectLead(entry, jobID, jobName)
 	if err := w.validator.Validate(lead); err != nil {
 		return err
 	}
 
-	// 1. Resolve identity across place_id, cid, and whatsapp (PASSO 2)
+	// 1. Resolve identity across place_id, cid, and whatsapp
 	existingID, err := w.ResolveIdentity(ctx, lead)
 	if err != nil {
 		return err
 	}
 
-	if existingID != "" {
-		// Existing canonical lead found: UPDATE without mutating place_id (PASSO 4) or SDR fields (PASSO 5 CASO F)
-		return w.updateExistingLead(ctx, existingID, lead)
+	canonicalPlaceID := existingID
+	if canonicalPlaceID != "" {
+		// Existing canonical lead found: UPDATE without mutating place_id or SDR fields
+		err = w.updateExistingLead(ctx, canonicalPlaceID, lead)
+	} else {
+		// Fresh lead: INSERT
+		canonicalPlaceID = lead.PlaceID
+		err = w.insertLead(ctx, lead)
 	}
 
-	// 2. fresh lead: INSERT
-	return w.insertLead(ctx, lead)
+	if err != nil {
+		return err
+	}
+
+	// 2. Link lead to search if job_id (search_id) is present (GATE 1 Provenance)
+	if lead.JobID != "" {
+		_ = w.LinkLeadToSearch(ctx, lead.JobID, canonicalPlaceID, 0)
+	}
+
+	return nil
 }

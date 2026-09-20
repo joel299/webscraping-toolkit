@@ -244,9 +244,16 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			cancel()
 
+			job.Status = web.StatusFailed
 			err2 := w.svc.Update(ctx, job)
 			if err2 != nil {
 				log.Printf("failed to update job status: %v", err2)
+			}
+
+			if sw := shadow.NewWriterFromEnv(); sw != nil {
+				if shadowWriter, ok := sw.(*shadow.Writer); ok {
+					_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", err.Error())
+				}
 			}
 
 			return err
@@ -256,12 +263,17 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	}
 
 	job.Status = web.StatusOK
+	if sw := shadow.NewWriterFromEnv(); sw != nil {
+		if shadowWriter, ok := sw.(*shadow.Writer); ok {
+			_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", "")
+		}
+	}
 
 	return w.svc.Update(ctx, job)
 }
 
 func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
-	return func(_ context.Context, writer io.Writer, job *web.Job) (mateRunner, error) {
+	return func(ctx context.Context, writer io.Writer, job *web.Job) (mateRunner, error) {
 		opts := []func(*scrapemateapp.Config) error{
 			scrapemateapp.WithConcurrency(cfg.Concurrency),
 			scrapemateapp.WithExitOnInactivity(time.Minute * 3),
@@ -303,8 +315,24 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 		csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(writer))
 
 		writers := []scrapemate.ResultWriter{csvWriter}
-		if shadowWriter := shadow.NewWriterFromEnv(); shadowWriter != nil {
-			writers = append(writers, shadowWriter)
+		if sw := shadow.NewWriterFromEnv(); sw != nil {
+			if shadowWriter, ok := sw.(*shadow.Writer); ok {
+				shadowWriter.SetJobContext(job.ID, job.Name)
+				var coords string
+				if job.Data.Lat != "" && job.Data.Lon != "" {
+					coords = job.Data.Lat + "," + job.Data.Lon
+				}
+				_ = shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+					SearchID:       job.ID,
+					JobID:          job.ID,
+					JobName:        job.Name,
+					Query:          strings.Join(job.Data.Keywords, ", "),
+					Location:       coords,
+					Category:       strings.Join(job.Data.Keywords, ", "),
+					RequestedLimit: job.Data.Depth,
+				})
+				writers = append(writers, shadowWriter)
+			}
 		}
 
 		matecfg, err := scrapemateapp.NewConfig(

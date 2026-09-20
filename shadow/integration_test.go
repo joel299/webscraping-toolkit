@@ -19,25 +19,21 @@ import (
 
 // applyMigrationFiles executes real versioned SQL migrations (GATE 3).
 func applyMigrationFiles(ctx context.Context, pool *pgxpool.Pool) error {
-	mig1 := "../supabase/migrations/20260920153500_prospect_leads_google_persistence.sql"
-	mig2 := "../supabase/migrations/20260920161000_prospect_leads_google_rls.sql"
-
-	content1, err := os.ReadFile(mig1)
-	if err != nil {
-		return fmt.Errorf("failed to read migration 1: %w", err)
+	migs := []string{
+		"../supabase/migrations/20260920153500_prospect_leads_google_persistence.sql",
+		"../supabase/migrations/20260920161000_prospect_leads_google_rls.sql",
+		"../supabase/migrations/20260920190000_prospect_searches_provenance.sql",
+		"../supabase/migrations/20260920191000_prospect_searches_rls.sql",
 	}
 
-	content2, err := os.ReadFile(mig2)
-	if err != nil {
-		return fmt.Errorf("failed to read migration 2: %w", err)
-	}
-
-	if _, err := pool.Exec(ctx, string(content1)); err != nil {
-		return fmt.Errorf("failed to apply migration 1: %w", err)
-	}
-
-	if _, err := pool.Exec(ctx, string(content2)); err != nil {
-		return fmt.Errorf("failed to apply migration 2: %w", err)
+	for i, path := range migs {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("failed to read migration %d (%s): %w", i+1, path, err)
+		}
+		if _, err := pool.Exec(ctx, string(content)); err != nil {
+			return fmt.Errorf("failed to apply migration %d (%s): %w", i+1, path, err)
+		}
 	}
 
 	return nil
@@ -403,6 +399,198 @@ func TestIdentityAndDeduplicationScenarios(t *testing.T) {
 	assert.True(t, convBool, "CASO F: converted preserved")
 	assert.True(t, dncBool, "CASO F: do_not_contact preserved")
 	assert.Equal(t, "COMPLETED", procStr, "CASO F: processing_status preserved")
+}
+
+func TestSearchToLeadProvenanceScenarios(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	config, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Skip("Skipping integration test: PostgreSQL container not reachable")
+		return
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil || pool.Ping(ctx) != nil {
+		t.Skip("Skipping integration test: PostgreSQL container ping failed")
+		return
+	}
+	defer pool.Close()
+
+	// 1. Clean & Apply all 4 SQL migrations
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_search_leads CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_searches CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+	require.NoError(t, applyMigrationFiles(ctx, pool))
+
+	writer := NewWriter(pool, 5*time.Second, 10)
+
+	// --- TEST A: 1 Search + 1 Lead ---
+	searchA := &SearchContext{
+		SearchID:       "search-001",
+		JobID:          "job-001",
+		JobName:        "Hamburgueria Campo Grande",
+		Query:          "Hamburgueria",
+		Location:       "-20.45,-54.60",
+		Category:       "Hamburgueria",
+		RequestedLimit: 1,
+	}
+	require.NoError(t, writer.RegisterSearch(ctx, searchA))
+
+	lead1 := &gmaps.Entry{
+		PlaceID:  "place-001",
+		Cid:      "cid-001",
+		Title:    "Hamburgueria Alpha",
+		Category: "Hamburgueria",
+		Phone:    "+55 (67) 99111-1111",
+	}
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName))
+
+	var (
+		countSearchesA   int
+		countLeadsA      int
+		countLinksA      int
+		searchStatusA    string
+		searchCompletedA *time.Time
+	)
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_searches").Scan(&countSearchesA))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google").Scan(&countLeadsA))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-001'").Scan(&countLinksA))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT status, completed_at FROM public.prospect_searches WHERE search_id = 'search-001'").Scan(&searchStatusA, &searchCompletedA))
+
+	assert.Equal(t, 1, countSearchesA, "TEST A: prospect_searches count must be 1")
+	assert.Equal(t, 1, countLeadsA, "TEST A: prospect_leads_google count must be 1")
+	assert.Equal(t, 1, countLinksA, "TEST A: prospect_search_leads link count must be 1")
+	assert.Equal(t, "running", searchStatusA, "TEST A: search status must be running before completion")
+
+	// Complete Search A (FASE 9)
+	require.NoError(t, writer.UpdateSearchStatus(ctx, searchA.SearchID, "completed", ""))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT status, completed_at FROM public.prospect_searches WHERE search_id = 'search-001'").Scan(&searchStatusA, &searchCompletedA))
+	assert.Equal(t, "completed", searchStatusA, "TEST A: search status must be updated to completed")
+	assert.NotNil(t, searchCompletedA, "TEST A: completed_at timestamp must be populated")
+
+	// --- TEST B: 1 Search + 5 Leads ---
+	searchB := &SearchContext{
+		SearchID:       "search-002",
+		JobID:          "job-002",
+		JobName:        "Hamburgueria 5 leads",
+		Query:          "Hamburgueria",
+		RequestedLimit: 5,
+	}
+	require.NoError(t, writer.RegisterSearch(ctx, searchB))
+
+	for i := 1; i <= 5; i++ {
+		entry := &gmaps.Entry{
+			PlaceID:  fmt.Sprintf("place-b-%03d", i),
+			Cid:      fmt.Sprintf("cid-b-%03d", i),
+			Title:    fmt.Sprintf("Empresa B %d", i),
+			Category: "Hamburgueria",
+			Phone:    fmt.Sprintf("+55 (67) 99222-%04d", i),
+		}
+		require.NoError(t, writer.UpsertLeadWithContext(ctx, entry, searchB.SearchID, searchB.JobName))
+	}
+
+	var countLinksB int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-002'").Scan(&countLinksB))
+	assert.Equal(t, 5, countLinksB, "TEST B: search-002 must link exactly 5 leads in prospect_search_leads")
+
+	// --- TEST C: 1 Search + 20 Leads ---
+	searchC := &SearchContext{
+		SearchID:       "search-003",
+		JobID:          "job-003",
+		JobName:        "Hamburgueria 20 leads",
+		Query:          "Hamburgueria",
+		RequestedLimit: 20,
+	}
+	require.NoError(t, writer.RegisterSearch(ctx, searchC))
+
+	for i := 1; i <= 20; i++ {
+		entry := &gmaps.Entry{
+			PlaceID:  fmt.Sprintf("place-c-%03d", i),
+			Cid:      fmt.Sprintf("cid-c-%03d", i),
+			Title:    fmt.Sprintf("Empresa C %d", i),
+			Category: "Hamburgueria",
+			Phone:    fmt.Sprintf("+55 (67) 99333-%04d", i),
+		}
+		require.NoError(t, writer.UpsertLeadWithContext(ctx, entry, searchC.SearchID, searchC.JobName))
+	}
+
+	var countLinksC int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-003'").Scan(&countLinksC))
+	assert.Equal(t, 20, countLinksC, "TEST C: search-003 must link exactly 20 leads in prospect_search_leads")
+
+	// --- TEST D: Same Search + Same Lead Twice ---
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, lead1, searchA.SearchID, searchA.JobName))
+	var countLinksADupe int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE search_id = 'search-001' AND place_id = 'place-001'").Scan(&countLinksADupe))
+	assert.Equal(t, 1, countLinksADupe, "TEST D: Duplicate lead in same search must result in exactly 1 relationship link (zero duplicate links)")
+
+	// --- TEST E: Search A + Lead X, Search B + Lead X ---
+	leadX := &gmaps.Entry{
+		PlaceID:  "place-cross-X",
+		Cid:      "cid-cross-X",
+		Title:    "Restaurante X Shared",
+		Category: "Restaurante",
+		Phone:    "+55 (67) 99444-4444",
+	}
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, leadX, searchA.SearchID, searchA.JobName))
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, leadX, searchB.SearchID, searchB.JobName))
+
+	var (
+		countCanonicalX int
+		countLinksX     int
+	)
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_leads_google WHERE place_id = 'place-cross-X'").Scan(&countCanonicalX))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE place_id = 'place-cross-X'").Scan(&countLinksX))
+
+	assert.Equal(t, 1, countCanonicalX, "TEST E: Lead X must remain 1 canonical row in prospect_leads_google")
+	assert.Equal(t, 2, countLinksX, "TEST E: Lead X must have 2 distinct provenance links in prospect_search_leads (search-001 and search-002)")
+
+	// --- TEST F: SDR Commercial Fields Preserved on Cross-Search Scrape ---
+	_, err = pool.Exec(ctx, `
+		UPDATE public.prospect_leads_google SET
+			lead_status = 'QUALIFIED_SDR',
+			pipeline_stage = 'DEMO_SCHEDULED',
+			converted = TRUE
+		WHERE place_id = 'place-cross-X'
+	`)
+	require.NoError(t, err)
+
+	// Scrape Lead X again under Search C
+	leadXEnriched := *leadX
+	leadXEnriched.ReviewRating = 4.9
+	require.NoError(t, writer.UpsertLeadWithContext(ctx, &leadXEnriched, searchC.SearchID, searchC.JobName))
+
+	var (
+		statusX          string
+		stageX           string
+		convX            bool
+		ratingX          float64
+		countLinksXAfter int
+	)
+	err = pool.QueryRow(ctx, `
+		SELECT lead_status, pipeline_stage, converted, review_rating
+		FROM public.prospect_leads_google WHERE place_id = 'place-cross-X'
+	`).Scan(&statusX, &stageX, &convX, &ratingX)
+	require.NoError(t, err)
+
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM public.prospect_search_leads WHERE place_id = 'place-cross-X'").Scan(&countLinksXAfter))
+
+	assert.Equal(t, "QUALIFIED_SDR", statusX, "TEST F: lead_status preserved across searches")
+	assert.Equal(t, "DEMO_SCHEDULED", stageX, "TEST F: pipeline_stage preserved across searches")
+	assert.True(t, convX, "TEST F: converted preserved across searches")
+	assert.Equal(t, 4.9, ratingX, "TEST F: review_rating enriched across searches")
+	assert.Equal(t, 3, countLinksXAfter, "TEST F: Lead X now has 3 provenance links (search-001, search-002, search-003)")
 }
 
 func TestShadowFallbackMode(t *testing.T) {
