@@ -245,8 +245,8 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) error {
 		phone, whatsapp, website, emails, email, review_rating, review_count,
 		latitude, longitude, google_maps_link, job_id, job_name, updated_at
 	) VALUES (
-		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-		$12, $13, $14, $15, $16, $17, $18,
+		$1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11,
+		$12, $13, $14, $15::jsonb, $16, $17, $18,
 		$19, $20, $21, NULLIF($22, ''), NULLIF($23, ''), NOW()
 	)
 	ON CONFLICT (place_id) DO UPDATE SET
