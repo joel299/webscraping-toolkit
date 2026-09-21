@@ -986,9 +986,15 @@ func (w *Writer) FetchGlobalLeadsPage(ctx context.Context, limit, offset int) ([
 	ORDER BY place_name ASC, place_id ASC
 	LIMIT $1 OFFSET $2`
 
+	// A pooled connection can be dropped while idle by the remote pooler. The
+	// read is idempotent, so retry once to avoid turning that transient event
+	// into a user-visible 500 response.
 	rows, err := w.pool.Query(ctx, query, limit, offset)
 	if err != nil {
-		return nil, 0, err
+		rows, err = w.pool.Query(ctx, query, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	defer rows.Close()
 

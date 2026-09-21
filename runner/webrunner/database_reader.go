@@ -106,7 +106,23 @@ func (r databaseReader) ListGlobalLeads(ctx context.Context, limit, offset int) 
 }
 
 func (r databaseReader) ExportCSV(ctx context.Context, id, path string) error {
-	leads, err := r.writer.FetchLeadsForSearchPage(ctx, id, 0, 0)
+	var leads []*shadow.ProspectLead
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		leads, err = r.writer.FetchLeadsForSearchPage(ctx, id, 0, 0)
+		if err == nil {
+			break
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
 	if err != nil {
 		return errDatabaseRead
 	}
