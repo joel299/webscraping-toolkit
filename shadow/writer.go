@@ -3,6 +3,7 @@ package shadow
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -57,14 +58,16 @@ func LoadDSN() string {
 }
 
 type SearchContext struct {
-	SearchID       string `json:"search_id"`
-	JobID          string `json:"job_id"`
-	JobName        string `json:"job_name"`
-	Query          string `json:"query"`
-	Location       string `json:"location"`
-	Category       string `json:"category"`
-	RequestedLimit int    `json:"requested_limit"`
-	Status         string `json:"status"`
+	SearchID       string     `json:"search_id"`
+	JobID          string     `json:"job_id"`
+	JobName        string     `json:"job_name"`
+	Query          string     `json:"query"`
+	Location       string     `json:"location"`
+	Category       string     `json:"category"`
+	RequestedLimit int        `json:"requested_limit"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
 
 type Metrics struct {
@@ -787,8 +790,61 @@ func (w *Writer) FindCompletedSearch(ctx context.Context, query string, location
 	return &s, nil
 }
 
-// FetchLeadsForSearch retrieves the canonical leads linked to a specific search_id.
-func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit int) ([]*ProspectLead, error) {
+// ListSearches returns persisted searches in the same newest-first order used
+// by the current UI. It is read-only and intentionally uses search provenance
+// rather than the mutable lead job_id column.
+func (w *Writer) ListSearches(ctx context.Context, offset, limit int) ([]SearchContext, int, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, 0, err
+	}
+	if w.disabled || w.pool == nil {
+		return nil, 0, errors.New("writer disabled or uninitialized")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := w.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.prospect_searches`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := w.pool.Query(ctx, `
+		SELECT search_id, job_id, COALESCE(job_name, ''), COALESCE(query, ''),
+		       COALESCE(location, ''), COALESCE(category, ''), COALESCE(requested_limit, 0),
+		       COALESCE(status, 'failed'), created_at, completed_at
+		FROM public.prospect_searches
+		ORDER BY created_at DESC, search_id DESC
+		LIMIT $1 OFFSET $2`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	searches := make([]SearchContext, 0, limit)
+	for rows.Next() {
+		var search SearchContext
+		if err := rows.Scan(
+			&search.SearchID, &search.JobID, &search.JobName, &search.Query,
+			&search.Location, &search.Category, &search.RequestedLimit,
+			&search.Status, &search.CreatedAt, &search.CompletedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		searches = append(searches, search)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	return searches, total, nil
+}
+
+// GetSearch returns one persisted search by its provenance identifier.
+func (w *Writer) GetSearch(ctx context.Context, searchID string) (*SearchContext, error) {
 	if err := w.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -796,26 +852,61 @@ func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit
 		return nil, errors.New("writer disabled or uninitialized")
 	}
 
-	if limit <= 0 {
-		limit = 1000
+	var search SearchContext
+	err := w.pool.QueryRow(ctx, `
+		SELECT search_id, job_id, COALESCE(job_name, ''), COALESCE(query, ''),
+		       COALESCE(location, ''), COALESCE(category, ''), COALESCE(requested_limit, 0),
+		       COALESCE(status, 'failed'), created_at, completed_at
+		FROM public.prospect_searches WHERE search_id = $1`, searchID).Scan(
+		&search.SearchID, &search.JobID, &search.JobName, &search.Query,
+		&search.Location, &search.Category, &search.RequestedLimit,
+		&search.Status, &search.CreatedAt, &search.CompletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &search, nil
+}
+
+// FetchLeadsForSearch retrieves the canonical leads linked to a specific search_id.
+func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit int) ([]*ProspectLead, error) {
+	return w.FetchLeadsForSearchPage(ctx, searchID, limit, 0)
+}
+
+// FetchLeadsForSearchPage retrieves canonical leads through the provenance
+// relation with deterministic ordering and offset pagination.
+func (w *Writer) FetchLeadsForSearchPage(ctx context.Context, searchID string, limit, offset int) ([]*ProspectLead, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if w.disabled || w.pool == nil {
+		return nil, errors.New("writer disabled or uninitialized")
+	}
+	if err := w.validateSearchLeadLinks(ctx, searchID); err != nil {
+		return nil, err
 	}
 
-	sql := `
+	query := `
 		SELECT 
 			g.place_id, COALESCE(g.cid, ''), g.place_name, COALESCE(g.category, ''),
 			COALESCE(g.address, ''), COALESCE(g.street, ''), COALESCE(g.city, ''),
 			COALESCE(g.state, ''), COALESCE(g.postal_code, ''), COALESCE(g.country, ''),
 			COALESCE(g.phone, ''), COALESCE(g.whatsapp, ''), COALESCE(g.website, ''),
-			COALESCE(g.email, ''), g.review_rating, g.review_count,
-			g.latitude, g.longitude, COALESCE(g.google_maps_link, '')
+			COALESCE(g.email, ''), COALESCE(g.emails, '[]'::jsonb),
+			COALESCE(g.review_rating, 0), COALESCE(g.review_count, 0),
+			COALESCE(g.latitude, 0), COALESCE(g.longitude, 0), COALESCE(g.google_maps_link, '')
 		FROM public.prospect_search_leads sl
 		JOIN public.prospect_leads_google g ON sl.place_id = g.place_id
 		WHERE sl.search_id = $1
 		ORDER BY sl.result_order ASC, sl.discovered_at ASC, sl.created_at ASC
-		LIMIT $2
 	`
+	args := []any{searchID}
+	if limit > 0 {
+		query += " LIMIT $2 OFFSET $3"
+		args = append(args, limit, maxInt(offset, 0))
+	}
 
-	rows, err := w.pool.Query(ctx, sql, searchID, limit)
+	rows, err := w.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -829,11 +920,16 @@ func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit
 			&l.Address, &l.Street, &l.City,
 			&l.State, &l.PostalCode, &l.Country,
 			&l.Phone, &l.Whatsapp, &l.Website,
-			&l.Email, &l.ReviewRating, &l.ReviewCount,
+			&l.Email, &l.EmailsJSON, &l.ReviewRating, &l.ReviewCount,
 			&l.Latitude, &l.Longitude, &l.GoogleMapsLink,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if len(l.EmailsJSON) > 0 {
+			if err := json.Unmarshal(l.EmailsJSON, &l.Emails); err != nil {
+				return nil, err
+			}
 		}
 		leads = append(leads, &l)
 	}
@@ -843,6 +939,37 @@ func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit
 	}
 
 	return leads, nil
+}
+
+// validateSearchLeadLinks prevents an inner join from silently dropping
+// provenance rows whose canonical lead is missing, and detects duplicate
+// relations before a database-first read is served.
+func (w *Writer) validateSearchLeadLinks(ctx context.Context, searchID string) error {
+	const query = `
+	SELECT
+		COUNT(*)::bigint,
+		COUNT(g.place_id)::bigint,
+		COUNT(*)::bigint - COUNT(DISTINCT sl.place_id)::bigint
+	FROM public.prospect_search_leads sl
+	LEFT JOIN public.prospect_leads_google g ON g.place_id = sl.place_id
+	WHERE sl.search_id = $1
+	`
+
+	var relationCount, joinedCount, duplicateCount int64
+	if err := w.pool.QueryRow(ctx, query, searchID).Scan(&relationCount, &joinedCount, &duplicateCount); err != nil {
+		return err
+	}
+	if relationCount != joinedCount || duplicateCount != 0 {
+		return errors.New("database search provenance is inconsistent")
+	}
+	return nil
+}
+
+func maxInt(value, minimum int) int {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 // WriteLeadsToCSVFile exports a slice of ProspectLeads to a standard CSV file matching gmaps.Entry header specs.

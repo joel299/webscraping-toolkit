@@ -128,16 +128,22 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 		return nil, err
 	}
 
-	svc := web.NewService(repo, cfg.DataFolder)
-
-	srv, err := web.New(svc, cfg.Addr)
-	if err != nil {
-		return nil, err
-	}
-
 	var shadowWriter *shadow.Writer
 	if rawWriter := shadow.NewWriterFromEnv(); rawWriter != nil {
 		shadowWriter, _ = rawWriter.(*shadow.Writer)
+	}
+
+	svc := web.NewService(repo, cfg.DataFolder)
+	if shadowWriter != nil {
+		svc.SetDatabaseReader(databaseReader{writer: shadowWriter})
+	}
+
+	srv, err := web.New(svc, cfg.Addr)
+	if err != nil {
+		if shadowWriter != nil {
+			_ = shadowWriter.Close()
+		}
+		return nil, err
 	}
 
 	ans := webrunner{

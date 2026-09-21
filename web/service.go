@@ -11,6 +11,7 @@ import (
 type Service struct {
 	repo       JobRepository
 	dataFolder string
+	database   DatabaseReader
 }
 
 type jobCounter interface {
@@ -24,6 +25,17 @@ func NewService(repo JobRepository, dataFolder string) *Service {
 	}
 }
 
+// SetDatabaseReader configures the optional server-side database-first read
+// path. The current SQLite/CSV path remains the default when the feature flag
+// is not set to database.
+func (s *Service) SetDatabaseReader(reader DatabaseReader) {
+	s.database = reader
+}
+
+func databaseReadMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PROSPECT_READ_MODE")), "database")
+}
+
 func (s *Service) Create(ctx context.Context, job *Job) error {
 	return s.repo.Create(ctx, job)
 }
@@ -34,6 +46,13 @@ func (s *Service) All(ctx context.Context) ([]Job, error) {
 
 // ListJobs returns a page of jobs, clamping invalid page and limit values.
 func (s *Service) ListJobs(ctx context.Context, page, limit int) (JobPage, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return JobPage{}, fmt.Errorf("database read mode is unavailable")
+		}
+		return s.database.ListJobs(ctx, page, limit)
+	}
+
 	var ans JobPage
 
 	if page < 1 {
@@ -98,6 +117,13 @@ func (s *Service) countJobs(ctx context.Context, params SelectParams) (int, erro
 }
 
 func (s *Service) Get(ctx context.Context, id string) (Job, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return Job{}, fmt.Errorf("database read mode is unavailable")
+		}
+		return s.database.GetJob(ctx, id)
+	}
+
 	return s.repo.Get(ctx, id)
 }
 
@@ -146,7 +172,21 @@ func (s *Service) csvPath(id string) (string, error) {
 	return filepath.Join(s.dataFolder, id+".csv"), nil
 }
 
-func (s *Service) GetCSV(_ context.Context, id string) (string, error) {
+func (s *Service) GetCSV(ctx context.Context, id string) (string, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return "", fmt.Errorf("database read mode is unavailable")
+		}
+		path, err := s.csvPath(id)
+		if err != nil {
+			return "", err
+		}
+		if err := s.database.ExportCSV(ctx, id, path); err != nil {
+			return "", fmt.Errorf("export database search: %w", err)
+		}
+		return path, nil
+	}
+
 	datapath, err := s.csvPath(id)
 	if err != nil {
 		return "", err

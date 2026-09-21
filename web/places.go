@@ -17,21 +17,34 @@ var ErrPlacesNotFound = errors.New("places not found")
 
 // Place is a single map-able result extracted from a job's CSV output.
 type Place struct {
-	Title        string  `json:"title"`
-	Address      string  `json:"address"`
-	Latitude     float64 `json:"latitude"`
-	Longitude    float64 `json:"longitude"`
-	Link         string  `json:"link"`
-	Category     string  `json:"category"`
-	Phone        string  `json:"phone"`
-	Website      string  `json:"website"`
-	ReviewRating float64 `json:"review_rating"`
+	Title        string   `json:"title"`
+	Address      string   `json:"address"`
+	Latitude     float64  `json:"latitude"`
+	Longitude    float64  `json:"longitude"`
+	Link         string   `json:"link"`
+	Category     string   `json:"category"`
+	Phone        string   `json:"phone"`
+	Website      string   `json:"website"`
+	ReviewRating float64  `json:"review_rating"`
+	ReviewCount  int      `json:"review_count"`
+	Emails       []string `json:"emails,omitempty"`
 }
 
 // GetPlaces locates the job's CSV output and parses it into mappable places.
 // In web mode each job writes exactly one {id}.csv, so that file is the single
 // source of truth for the map.
-func (s *Service) GetPlaces(_ context.Context, id string) ([]Place, error) {
+func (s *Service) GetPlaces(ctx context.Context, id string) ([]Place, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return nil, errors.New("database read mode is unavailable")
+		}
+		places, err := s.database.GetPlaces(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return places, nil
+	}
+
 	path, err := s.csvPath(id)
 	if err != nil {
 		return nil, err
@@ -129,10 +142,16 @@ func parsePlaces(r io.Reader) ([]Place, error) {
 			Phone:        get(row, "phone"),
 			Website:      get(row, "website"),
 			ReviewRating: rating,
+			ReviewCount:  parseInt(get(row, "review_count")),
 		})
 	}
 
 	return places, nil
+}
+
+func parseInt(value string) int {
+	parsed, _ := strconv.Atoi(value)
+	return parsed
 }
 
 // finite reports whether f is a usable, real number (not NaN or ±Inf).

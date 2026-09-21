@@ -44,6 +44,15 @@ type JobRepository interface {
 	Update(context.Context, *Job) error
 }
 
+// DatabaseReader provides the read-only database-first view of persisted
+// searches. Implementations must resolve leads through search provenance.
+type DatabaseReader interface {
+	ListJobs(context.Context, int, int) (JobPage, error)
+	GetJob(context.Context, string) (Job, error)
+	GetPlaces(context.Context, string) ([]Place, error)
+	ExportCSV(context.Context, string, string) error
+}
+
 // JobClaimer atomically claims one pending job for processing.
 type JobClaimer interface {
 	ClaimPending(context.Context) (*Job, error)
