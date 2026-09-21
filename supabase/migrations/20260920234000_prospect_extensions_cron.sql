@@ -3,11 +3,19 @@
 -- CRON_ACTIVATION_ALLOWED=false
 -- EXTERNAL_SIDE_EFFECTS_DISABLED=PASS
 
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
-
 DO $$
 BEGIN
+    BEGIN
+        CREATE EXTENSION IF NOT EXISTS pg_cron;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'pg_cron extension not available in environment: %', SQLERRM;
+    END;
+    BEGIN
+        CREATE EXTENSION IF NOT EXISTS pg_net;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'pg_net extension not available in environment: %', SQLERRM;
+    END;
+
     IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cron') THEN
         -- Unschedule prospect-leads-google-dispatcher if present
         IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'prospect-leads-google-dispatcher') THEN

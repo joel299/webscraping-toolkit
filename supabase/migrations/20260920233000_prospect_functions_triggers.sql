@@ -50,8 +50,14 @@ CREATE OR REPLACE FUNCTION public.create_google_lead_followup()
 AS $function$
 declare
     base_date timestamptz;
+    v_lead_id text;
 begin
     base_date := coalesce(new.created_at, now());
+    v_lead_id := coalesce(new.id, new.place_id);
+
+    if v_lead_id is null or v_lead_id = '' then
+        return new;
+    end if;
 
     insert into public.prospect_followup_google (
         lead_id,
@@ -67,7 +73,7 @@ begin
         next_followup_at
     )
     values (
-        new.id,
+        v_lead_id,
         'pending',
         1,
         base_date + interval '1 day',
@@ -83,12 +89,13 @@ begin
 
     update public.prospect_leads_google
     set
+        id = coalesce(id, v_lead_id),
         status = 'followup_pending',
         followup_enabled = true,
         followup_current = 1,
         next_followup_at = base_date + interval '1 day',
         updated_at = now()
-    where id = new.id;
+    where id = v_lead_id or place_id = v_lead_id;
 
     return new;
 end;

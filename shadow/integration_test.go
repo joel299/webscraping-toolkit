@@ -17,13 +17,21 @@ import (
 	"github.com/gosom/google-maps-scraper/gmaps"
 )
 
-// applyMigrationFiles executes real versioned SQL migrations (GATE 3).
+// applyMigrationFiles executes real versioned SQL migrations (GATE 3 & GRU-89).
 func applyMigrationFiles(ctx context.Context, pool *pgxpool.Pool) error {
 	migs := []string{
 		"../supabase/migrations/20260920153500_prospect_leads_google_persistence.sql",
 		"../supabase/migrations/20260920161000_prospect_leads_google_rls.sql",
 		"../supabase/migrations/20260920190000_prospect_searches_provenance.sql",
 		"../supabase/migrations/20260920191000_prospect_searches_rls.sql",
+		"../supabase/migrations/20260920193000_prospect_searches_hardening.sql",
+		"../supabase/migrations/20260920202000_prospect_searches_revoke_delete.sql",
+		"../supabase/migrations/20260920230000_prospect_leads_google_legacy_columns.sql",
+		"../supabase/migrations/20260920231000_prospect_followup_google.sql",
+		"../supabase/migrations/20260920232000_ia_chat_histories_prospect_google.sql",
+		"../supabase/migrations/20260920233000_prospect_functions_triggers.sql",
+		"../supabase/migrations/20260920234000_prospect_extensions_cron.sql",
+		"../supabase/migrations/20260920235000_ensure_prospect_cron_unscheduled.sql",
 	}
 
 	for i, path := range migs {
@@ -896,4 +904,72 @@ func TestDatabaseFirstReadPathScenarios(t *testing.T) {
 	noCached, err := writer.FindCompletedSearch(ctx, "Sushi Bar", "-20.45,-54.60")
 	assert.Error(t, err, "Non-existent search must return error / no rows")
 	assert.Nil(t, noCached)
+}
+
+func TestGRU89MigrationsAndFollowupTrigger(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	config, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Skip("Skipping integration test: PostgreSQL container not reachable")
+		return
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil || pool.Ping(ctx) != nil {
+		t.Skip("Skipping integration test: PostgreSQL container ping failed")
+		return
+	}
+	defer pool.Close()
+
+	// Clean & Apply all migrations
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_followup_google CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.ia_chat_histories_prospect_google CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_search_leads CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_searches CASCADE")
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+	require.NoError(t, applyMigrationFiles(ctx, pool))
+
+	writer := NewWriter(pool, 5*time.Second, 10)
+
+	// Test 1: NEW_LEAD_INSERT_WITH_TRIGGER
+	leadEntry := &gmaps.Entry{
+		Title:    "Trigger Test Lead",
+		Category: "Test Category",
+		Phone:    "+55 67 98888-7777",
+		Link:     "https://maps.google.com/?cid=trigger-test-cid",
+	}
+
+	res, err := writer.UpsertLeadWithContext(ctx, leadEntry, "job-trigger-001", "Trigger Test Job")
+	require.NoError(t, err, "Insert must succeed without aborting transaction (TRANSACTION_ABORTED=false)")
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.CanonicalPlaceID)
+
+	canonicalID := res.CanonicalPlaceID
+
+	// Verify prospect_leads_google row has place_id and id populated (NEW_LEAD_INSERT_WITH_TRIGGER=PASS)
+	var storedID, storedPlaceID string
+	err = pool.QueryRow(ctx, "SELECT id, place_id FROM public.prospect_leads_google WHERE place_id = $1", canonicalID).Scan(&storedID, &storedPlaceID)
+	require.NoError(t, err)
+	assert.Equal(t, canonicalID, storedPlaceID)
+	assert.Equal(t, canonicalID, storedID)
+
+	// Verify prospect_followup_google row created by trigger (FOLLOWUP_CREATED=PASS)
+	var followupLeadID, followupStatus string
+	var currentFollowup int
+	err = pool.QueryRow(ctx, "SELECT lead_id, status, current_followup FROM public.prospect_followup_google WHERE lead_id = $1", canonicalID).Scan(&followupLeadID, &followupStatus, &currentFollowup)
+	require.NoError(t, err, "prospect_followup_google record must be created by trigger")
+	assert.Equal(t, canonicalID, followupLeadID, "FOLLOWUP_CANONICAL_ID=PASS")
+	assert.Equal(t, "pending", followupStatus)
+	assert.Equal(t, 1, currentFollowup)
 }

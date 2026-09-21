@@ -23,6 +23,9 @@ import (
 
 var dsnPasswordRegex = regexp.MustCompile(`postgres(ql)?://([^:]+):([^@]+)@`)
 
+// ErrWriterClosed indicates that the writer lifecycle has ended.
+var ErrWriterClosed = errors.New("shadow writer is closed")
+
 // SanitizeDSN removes passwords from connection strings to prevent credential exposure in logs.
 func SanitizeDSN(dsn string) string {
 	if dsn == "" {
@@ -79,6 +82,7 @@ type Metrics struct {
 
 type Writer struct {
 	pool               *pgxpool.Pool
+	poolOwned          bool
 	saveInterval       time.Duration
 	batchSize          int
 	metrics            Metrics
@@ -89,6 +93,9 @@ type Writer struct {
 	jobID              string
 	jobName            string
 	provenanceDegraded uint32
+	closed             uint32
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 type UpsertOutcome string
@@ -141,14 +148,7 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 
 	if err := pool.Ping(ctx); err != nil {
 		log.Warn("shadow persistence operating in shadow-fail mode: ping failed", "dsn", SanitizeDSN(dsn), "error_class", ProvenanceErrorClass(err))
-		return &Writer{
-			pool:         pool,
-			saveInterval: 5 * time.Second,
-			batchSize:    10,
-			mapper:       NewProspectLeadMapper(),
-			validator:    NewProspectLeadValidator(),
-			disabled:     false,
-		}
+		return newWriter(pool, true, 5*time.Second, 10)
 	}
 
 	log.Info("shadow persistence connected successfully", "dsn", SanitizeDSN(dsn))
@@ -156,13 +156,7 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 		log.Warn("shadow persistence schema validation warning: table missing or unreadable; shadow writer entering shadow-fail mode", "error_class", ProvenanceErrorClass(err))
 	}
 
-	return &Writer{
-		pool:         pool,
-		saveInterval: 5 * time.Second,
-		batchSize:    10,
-		mapper:       NewProspectLeadMapper(),
-		validator:    NewProspectLeadValidator(),
-	}
+	return newWriter(pool, true, 5*time.Second, 10)
 }
 
 // ValidateSchema verifies that public.prospect_leads_google exists without performing runtime DDL (GATE 4).
@@ -175,21 +169,46 @@ func ValidateSchema(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func NewDisabledWriter() *Writer {
-	return &Writer{
-		disabled:  true,
-		mapper:    NewProspectLeadMapper(),
-		validator: NewProspectLeadValidator(),
-	}
+	return newWriter(nil, false, 0, 0)
 }
 
 func NewWriter(pool *pgxpool.Pool, saveInterval time.Duration, batchSize int) *Writer {
+	return newWriter(pool, false, saveInterval, batchSize)
+}
+
+func newWriter(pool *pgxpool.Pool, poolOwned bool, saveInterval time.Duration, batchSize int) *Writer {
 	return &Writer{
 		pool:         pool,
+		poolOwned:    poolOwned,
 		saveInterval: saveInterval,
 		batchSize:    batchSize,
 		mapper:       NewProspectLeadMapper(),
 		validator:    NewProspectLeadValidator(),
+		disabled:     pool == nil,
 	}
+}
+
+// Close releases an environment-owned pool. It is safe to call repeatedly.
+func (w *Writer) Close() error {
+	if w == nil {
+		return nil
+	}
+
+	w.closeOnce.Do(func() {
+		atomic.StoreUint32(&w.closed, 1)
+		if w.poolOwned && w.pool != nil {
+			w.pool.Close()
+		}
+	})
+
+	return w.closeErr
+}
+
+func (w *Writer) ensureOpen() error {
+	if w == nil || atomic.LoadUint32(&w.closed) == 1 {
+		return ErrWriterClosed
+	}
+	return nil
 }
 
 func (w *Writer) GetMetrics() Metrics {
@@ -496,6 +515,7 @@ func (w *Writer) updateExistingLead(ctx context.Context, canonicalPlaceID string
 	),
 	updated AS (
 		UPDATE public.prospect_leads_google AS target SET
+			id = COALESCE(target.id, $1::text),
 			cid = CASE WHEN $2::text IS NOT NULL AND $2::text != '' THEN $2::text ELSE target.cid END,
 			place_name = $3::text,
 			category = $4::text,
@@ -581,11 +601,11 @@ func (w *Writer) updateExistingLead(ctx context.Context, canonicalPlaceID string
 func (w *Writer) insertLead(ctx context.Context, lead *ProspectLead) (string, error) {
 	q := `
 	INSERT INTO public.prospect_leads_google (
-		place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country,
+		id, place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country,
 		phone, whatsapp, website, emails, email, review_rating, review_count,
 		latitude, longitude, google_maps_link, job_id, job_name, updated_at
 	) VALUES (
-		$1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11,
+		$1, $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11,
 		$12, $13, $14, $15::jsonb, $16, $17, $18,
 		$19, $20, $21, NULLIF($22, ''), NULLIF($23, ''), NOW()
 	)
