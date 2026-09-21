@@ -49,9 +49,18 @@ type JobRepository interface {
 type DatabaseReader interface {
 	ListAllJobs(context.Context) ([]Job, error)
 	ListJobs(context.Context, int, int) (JobPage, error)
+	ListGlobalLeads(context.Context, int, int) (GlobalLeadsPage, error)
 	GetJob(context.Context, string) (Job, error)
 	GetPlaces(context.Context, string) ([]Place, error)
 	ExportCSV(context.Context, string, string) error
+}
+
+// GlobalLeadsPage is the bounded, server-deduplicated global leads response.
+type GlobalLeadsPage struct {
+	Items  []Place `json:"items"`
+	Total  int     `json:"total"`
+	Limit  int     `json:"limit"`
+	Offset int     `json:"offset"`
 }
 
 // JobClaimer atomically claims one pending job for processing.

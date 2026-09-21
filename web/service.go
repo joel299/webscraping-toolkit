@@ -109,6 +109,18 @@ func (s *Service) ListJobs(ctx context.Context, page, limit int) (JobPage, error
 	return ans, nil
 }
 
+// ListGlobalLeads returns a bounded, server-deduplicated read model.
+func (s *Service) ListGlobalLeads(ctx context.Context, limit, offset int) (GlobalLeadsPage, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return GlobalLeadsPage{}, fmt.Errorf("database read mode is unavailable")
+		}
+		return s.database.ListGlobalLeads(ctx, limit, offset)
+	}
+
+	return GlobalLeadsPage{}, fmt.Errorf("global leads database read mode is unavailable")
+}
+
 func (s *Service) countJobs(ctx context.Context, params SelectParams) (int, error) {
 	if counter, ok := s.repo.(jobCounter); ok {
 		return counter.Count(ctx, params)

@@ -411,7 +411,7 @@
             if (statusEl) statusEl.textContent = 'Carregando empresas encontradas em todas as pesquisas...';
             
             try {
-                const res = await fetch('/api/v1/jobs');
+                const res = await fetch('/api/v1/leads?limit=500&offset=0');
                 if (!res.ok) {
                     if (statusEl) statusEl.textContent = 'Nenhuma pesquisa encontrada.';
                     updateLeadsBadge(0);
@@ -420,52 +420,26 @@
                 }
                 
                 const data = await res.json();
-                const jobs = Array.isArray(data) ? data : (data.Jobs || []);
+                const items = Array.isArray(data.items) ? data.items : [];
 
-                if (jobs.length === 0) {
+                if (items.length === 0) {
                     if (statusEl) statusEl.textContent = 'Nenhuma pesquisa iniciada ainda.';
                     updateLeadsBadge(0);
                     renderGlobalLeadsUI([]);
                     return;
                 }
 
-                // Populate global job filter
-                populateJobFilter(jobs);
-
-                const allPlaces = [];
-                const keySet = new Set();
-                const categories = new Set();
-
-                for (const job of jobs) {
-                    const jobId = job.ID || job.id;
-                    const htmlRes = await fetch('/view?id=' + jobId);
-                    if (!htmlRes.ok) continue;
-                    const htmlText = await htmlRes.text();
-                    
-                    const match = htmlText.match(/var\s+places\s*=\s*(\[[\s\S]*?\]);/);
-                    if (match && match[1]) {
-                        try {
-                            const places = JSON.parse(match[1]);
-                            if (Array.isArray(places)) {
-                                places.forEach(p => {
-                                    p._jobName = job.Name || job.name;
-                                    p._jobID = jobId;
-                                    const key = p.result_key || p.place_id || p.data_id || ((p.title || '') + '|' + (p.address || '')).toLowerCase();
-                                    if (key && !keySet.has(key)) {
-                                        keySet.add(key);
-                                        allPlaces.push(p);
-                                        if (p.category) categories.add(p.category);
-                                    }
-                                });
-                            }
-                        } catch(e) {
-                            console.error('Erro ao processar resultados da pesquisa:', jobId, e);
-                        }
-                    }
-                }
-
-                globalLeadsData = allPlaces;
-                populateCategoryFilter(Array.from(categories).sort());
+                globalLeadsData = items.map(p => ({
+                    ...p,
+                    _jobID: p.job_id || p.search_id || '',
+                    _jobName: p.job_name || p.search_name || ''
+                }));
+                const jobsByID = new Map();
+                globalLeadsData.forEach(p => {
+                    if (p._jobID && !jobsByID.has(p._jobID)) jobsByID.set(p._jobID, {ID: p._jobID, Name: p._jobName});
+                });
+                populateJobFilter(Array.from(jobsByID.values()));
+                populateCategoryFilter([...new Set(globalLeadsData.map(p => p.category).filter(Boolean))].sort());
 
                 filterGlobalLeads();
             } catch(err) {

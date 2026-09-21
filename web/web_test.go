@@ -203,6 +203,14 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 	if strings.Contains(body, `onclick="prepareFormSubmission()"`) {
 		t.Fatal("submit preparation must not depend on the button click handler")
 	}
+
+	if !strings.Contains(body, `fetch('/api/v1/leads?limit=500&offset=0')`) {
+		t.Fatal("global leads must use the aggregated JSON read endpoint")
+	}
+
+	if strings.Contains(body, `fetch('/api/v1/jobs')`) || strings.Contains(body, `fetch('/view?id='`) {
+		t.Fatal("global leads must not perform the sequential jobs/view N+1 read path")
+	}
 }
 
 func TestScrapeRendersFirstPageAfterCreatingJob(t *testing.T) {

@@ -17,6 +17,7 @@ var ErrPlacesNotFound = errors.New("places not found")
 
 // Place is a single map-able result extracted from a job's CSV output.
 type Place struct {
+	PlaceID      string   `json:"place_id,omitempty"`
 	Title        string   `json:"title"`
 	Address      string   `json:"address"`
 	Latitude     float64  `json:"latitude"`
@@ -28,6 +29,8 @@ type Place struct {
 	ReviewRating float64  `json:"review_rating"`
 	ReviewCount  int      `json:"review_count"`
 	Emails       []string `json:"emails,omitempty"`
+	JobID        string   `json:"job_id,omitempty"`
+	JobName      string   `json:"job_name,omitempty"`
 }
 
 // GetPlaces locates the job's CSV output and parses it into mappable places.

@@ -93,6 +93,18 @@ func (r databaseReader) GetPlaces(ctx context.Context, id string) ([]web.Place, 
 	return places, nil
 }
 
+func (r databaseReader) ListGlobalLeads(ctx context.Context, limit, offset int) (web.GlobalLeadsPage, error) {
+	leads, total, err := r.writer.FetchGlobalLeadsPage(ctx, limit, offset)
+	if err != nil {
+		return web.GlobalLeadsPage{}, errDatabaseRead
+	}
+	items := make([]web.Place, 0, len(leads))
+	for _, lead := range leads {
+		items = append(items, leadToPlace(lead))
+	}
+	return web.GlobalLeadsPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
 func (r databaseReader) ExportCSV(ctx context.Context, id, path string) error {
 	leads, err := r.writer.FetchLeadsForSearchPage(ctx, id, 0, 0)
 	if err != nil {
@@ -142,6 +154,7 @@ func splitLocation(location string) (string, string) {
 
 func leadToPlace(lead *shadow.ProspectLead) web.Place {
 	return web.Place{
+		PlaceID: lead.PlaceID, JobID: lead.JobID, JobName: lead.JobName,
 		Title: lead.PlaceName, Address: lead.Address, Latitude: lead.Latitude,
 		Longitude: lead.Longitude, Link: lead.GoogleMapsLink, Category: lead.Category,
 		Phone: lead.Phone, Website: lead.Website, ReviewRating: lead.ReviewRating,

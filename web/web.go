@@ -93,6 +93,18 @@ func New(svc *Service, addr string) (*Server, error) {
 			renderJSON(w, http.StatusMethodNotAllowed, ans)
 		}
 	})
+	mux.HandleFunc("/api/v1/leads", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: methodNotAllowedMessage})
+			return
+		}
+		page, err := ans.apiGlobalLeads(r)
+		if err != nil {
+			renderJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "failed to load global leads"})
+			return
+		}
+		renderJSON(w, http.StatusOK, page)
+	})
 
 	mux.HandleFunc("/api/v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		r = requestWithID(r)
@@ -584,6 +596,29 @@ func (s *Server) apiGetJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderJSON(w, http.StatusOK, jobs)
+}
+
+func (s *Server) apiGlobalLeads(r *http.Request) (GlobalLeadsPage, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			return GlobalLeadsPage{}, fmt.Errorf("invalid limit")
+		}
+		limit = parsed
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return GlobalLeadsPage{}, fmt.Errorf("invalid offset")
+		}
+		offset = parsed
+	}
+	return s.svc.ListGlobalLeads(r.Context(), limit, offset)
 }
 
 func (s *Server) apiGetJob(w http.ResponseWriter, r *http.Request) {

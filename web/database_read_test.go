@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +24,18 @@ func (f fakeDatabaseReader) ListAllJobs(context.Context) ([]Job, error) {
 
 func (f fakeDatabaseReader) ListJobs(context.Context, int, int) (JobPage, error) {
 	return f.page, nil
+}
+
+func (f fakeDatabaseReader) ListGlobalLeads(_ context.Context, limit, offset int) (GlobalLeadsPage, error) {
+	start := offset
+	if start > len(f.place) {
+		start = len(f.place)
+	}
+	end := start + limit
+	if end > len(f.place) {
+		end = len(f.place)
+	}
+	return GlobalLeadsPage{Items: f.place[start:end], Total: len(f.place), Limit: limit, Offset: offset}, nil
 }
 
 func (f fakeDatabaseReader) GetJob(context.Context, string) (Job, error) {
@@ -130,5 +144,59 @@ func TestAPIGetJobsUsesSQLiteInCurrentMode(t *testing.T) {
 	}
 	if len(jobs) != 1 || jobs[0].ID != "sqlite-job" {
 		t.Fatalf("current-mode jobs = %+v", jobs)
+	}
+}
+
+func TestAPIGlobalLeadsUsesAggregatedDatabaseReadModel(t *testing.T) {
+	t.Setenv("PROSPECT_READ_MODE", "database")
+	repo := &mockJobRepo{}
+	reader := fakeDatabaseReader{place: []Place{
+		{PlaceID: "place-1", Title: "Alpha", JobID: "search-1", JobName: "Busca A"},
+		{PlaceID: "place-2", Title: "Beta", JobID: "search-2", JobName: "Busca B"},
+	}}
+	srv, err := New(NewService(repo, t.TempDir()), ":0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.svc.SetDatabaseReader(reader)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/leads?limit=1&offset=1", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var page GlobalLeadsPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if page.Total != 2 || page.Limit != 1 || page.Offset != 1 || len(page.Items) != 1 || page.Items[0].JobID != "search-2" {
+		t.Fatalf("global leads page = %+v", page)
+	}
+}
+
+type failingGlobalReader struct{ fakeDatabaseReader }
+
+func (failingGlobalReader) ListGlobalLeads(context.Context, int, int) (GlobalLeadsPage, error) {
+	return GlobalLeadsPage{}, errors.New("database credentials must not be exposed")
+}
+
+func TestAPIGlobalLeadsSanitizesDatabaseErrors(t *testing.T) {
+	t.Setenv("PROSPECT_READ_MODE", "database")
+	srv, err := New(NewService(&mockJobRepo{}, t.TempDir()), ":0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.svc.SetDatabaseReader(failingGlobalReader{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/leads", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "credentials") {
+		t.Fatalf("response exposed database error: %s", rec.Body.String())
 	}
 }

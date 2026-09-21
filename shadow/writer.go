@@ -941,6 +941,87 @@ func (w *Writer) FetchLeadsForSearchPage(ctx context.Context, searchID string, l
 	return leads, nil
 }
 
+// FetchGlobalLeadsPage returns a bounded global lead read model. Canonical
+// place identities are deduplicated in PostgreSQL while retaining one stable
+// originating search for client-side filtering and display.
+func (w *Writer) FetchGlobalLeadsPage(ctx context.Context, limit, offset int) ([]*ProspectLead, int, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, 0, err
+	}
+	if w.disabled || w.pool == nil {
+		return nil, 0, errors.New("writer disabled or uninitialized")
+	}
+	if limit < 1 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	const query = `
+	WITH canonical AS (
+		SELECT DISTINCT ON (g.place_id)
+			g.place_id AS place_id, COALESCE(g.cid, '') AS cid, g.place_name AS place_name,
+			COALESCE(g.category, '') AS category, COALESCE(g.address, '') AS address,
+			COALESCE(g.phone, '') AS phone, COALESCE(g.website, '') AS website,
+			COALESCE(g.email, '') AS email, COALESCE(g.emails, '[]'::jsonb) AS emails,
+			COALESCE(g.review_rating, 0) AS review_rating,
+			COALESCE(g.review_count, 0) AS review_count,
+			COALESCE(g.latitude, 0) AS latitude, COALESCE(g.longitude, 0) AS longitude,
+			COALESCE(g.google_maps_link, '') AS google_maps_link,
+			sl.search_id AS search_id, COALESCE(s.job_name, '') AS job_name
+		FROM public.prospect_search_leads sl
+		JOIN public.prospect_leads_google g ON g.place_id = sl.place_id
+		JOIN public.prospect_searches s ON s.search_id = sl.search_id
+		ORDER BY g.place_id, sl.result_order ASC NULLS LAST,
+			sl.discovered_at ASC NULLS LAST, sl.created_at ASC, sl.search_id ASC
+	), counted AS (
+		SELECT canonical.*, COUNT(*) OVER() AS total_count
+		FROM canonical
+	)
+	SELECT place_id, cid, place_name, category, address, phone, website,
+		email, emails, review_rating, review_count, latitude, longitude,
+		google_maps_link, search_id, job_name, total_count
+	FROM counted
+	ORDER BY place_name ASC, place_id ASC
+	LIMIT $1 OFFSET $2`
+
+	rows, err := w.pool.Query(ctx, query, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	leads := make([]*ProspectLead, 0, limit)
+	total := 0
+	for rows.Next() {
+		var lead ProspectLead
+		var totalCount int64
+		if err := rows.Scan(
+			&lead.PlaceID, &lead.Cid, &lead.PlaceName, &lead.Category,
+			&lead.Address, &lead.Phone, &lead.Website, &lead.Email,
+			&lead.EmailsJSON, &lead.ReviewRating, &lead.ReviewCount,
+			&lead.Latitude, &lead.Longitude, &lead.GoogleMapsLink,
+			&lead.JobID, &lead.JobName, &totalCount,
+		); err != nil {
+			return nil, 0, err
+		}
+		if len(lead.EmailsJSON) > 0 {
+			if err := json.Unmarshal(lead.EmailsJSON, &lead.Emails); err != nil {
+				return nil, 0, err
+			}
+		}
+		if total == 0 {
+			total = int(totalCount)
+		}
+		leads = append(leads, &lead)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return leads, total, nil
+}
+
 // validateSearchLeadLinks prevents an inner join from silently dropping
 // provenance rows whose canonical lead is missing, and detects duplicate
 // relations before a database-first read is served.
