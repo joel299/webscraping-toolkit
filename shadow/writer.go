@@ -74,6 +74,7 @@ type Metrics struct {
 	SearchLeadLinksInserted  uint64 `json:"search_lead_links_inserted"`
 	SearchLeadLinksUnchanged uint64 `json:"search_lead_links_unchanged"`
 	ProvenanceFailed         uint64 `json:"provenance_failed"`
+	ProvenanceDegraded       bool   `json:"provenance_degraded"`
 }
 
 type Writer struct {
@@ -87,6 +88,7 @@ type Writer struct {
 	validator    *ProspectLeadValidator
 	jobID        string
 	jobName      string
+	provenanceDegraded uint32
 }
 
 type UpsertOutcome string
@@ -133,12 +135,12 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		log.Warn("shadow persistence disabled: failed to initialize pool", "dsn", SanitizeDSN(dsn), "error", err)
+		log.Warn("shadow persistence disabled: failed to initialize pool", "dsn", SanitizeDSN(dsn), "error_class", ProvenanceErrorClass(err))
 		return NewDisabledWriter()
 	}
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Warn("shadow persistence operating in shadow-fail mode: ping failed", "dsn", SanitizeDSN(dsn), "error", err)
+		log.Warn("shadow persistence operating in shadow-fail mode: ping failed", "dsn", SanitizeDSN(dsn), "error_class", ProvenanceErrorClass(err))
 		return &Writer{
 			pool:         pool,
 			saveInterval: 5 * time.Second,
@@ -151,7 +153,7 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 
 	log.Info("shadow persistence connected successfully", "dsn", SanitizeDSN(dsn))
 	if err := ValidateSchema(ctx, pool); err != nil {
-		log.Warn("shadow persistence schema validation warning: table missing or unreadable; shadow writer entering shadow-fail mode", "error", err)
+		log.Warn("shadow persistence schema validation warning: table missing or unreadable; shadow writer entering shadow-fail mode", "error_class", ProvenanceErrorClass(err))
 	}
 
 	return &Writer{
@@ -201,7 +203,33 @@ func (w *Writer) GetMetrics() Metrics {
 		SearchLeadLinksInserted:  atomic.LoadUint64(&w.metrics.SearchLeadLinksInserted),
 		SearchLeadLinksUnchanged: atomic.LoadUint64(&w.metrics.SearchLeadLinksUnchanged),
 		ProvenanceFailed:         atomic.LoadUint64(&w.metrics.ProvenanceFailed),
+		ProvenanceDegraded:       atomic.LoadUint32(&w.provenanceDegraded) == 1,
 	}
+}
+
+// ProvenanceErrorClass returns a safe, low-cardinality classification for persistence errors.
+// It deliberately does not expose database error text, DSNs, or user data in logs.
+func ProvenanceErrorClass(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded"
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return "postgres_" + pgErr.Code
+	}
+	return "database_error"
+}
+
+func (w *Writer) markProvenanceFailure(operation string, err error) {
+	atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
+	atomic.StoreUint32(&w.provenanceDegraded, 1)
+	log.Warn("shadow provenance operation failed", "operation", operation, "error_class", ProvenanceErrorClass(err))
 }
 
 // RegisterSearch registers or updates a search in public.prospect_searches (GATE 7 & GATE 8)
@@ -223,9 +251,8 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 	}
 
 	if !validStatuses[status] {
-		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
 		err := fmt.Errorf("invalid search status: %s", status)
-		log.Warn("shadow persistence register search invalid status", "status", status, "search_id", s.SearchID)
+		w.markProvenanceFailure("register_search", err)
 		return err
 	}
 
@@ -260,8 +287,7 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 	).Scan(&isInsert)
 
 	if err != nil {
-		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
-		log.Warn("shadow persistence register search failed", "search_id", s.SearchID, "error", err)
+		w.markProvenanceFailure("register_search", err)
 		return err
 	}
 
@@ -288,9 +314,8 @@ func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMs
 	}
 
 	if !validStatuses[status] {
-		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
 		err := fmt.Errorf("invalid search status: %s", status)
-		log.Warn("shadow persistence update search status invalid status", "status", status, "search_id", searchID)
+		w.markProvenanceFailure("update_search_status", err)
 		return err
 	}
 
@@ -311,8 +336,7 @@ func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMs
 
 	_, err := w.pool.Exec(ctx, q, searchID, status, errMsg, completedAt)
 	if err != nil {
-		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
-		log.Warn("shadow persistence update search status failed", "search_id", searchID, "error", err)
+		w.markProvenanceFailure("update_search_status", err)
 		return err
 	}
 
@@ -342,8 +366,7 @@ func (w *Writer) LinkLeadToSearch(ctx context.Context, searchID, placeID string,
 			atomic.AddUint64(&w.metrics.SearchLeadLinksUnchanged, 1)
 			return nil
 		}
-		atomic.AddUint64(&w.metrics.ProvenanceFailed, 1)
-		log.Warn("shadow persistence link lead to search failed", "search_id", searchID, "place_id", placeID, "error", err)
+		w.markProvenanceFailure("link_lead_to_search", err)
 		return err
 	}
 
@@ -420,8 +443,7 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 		_ = res
 		if err != nil {
 			atomic.AddUint64(&w.metrics.Failed, 1)
-			log.Warn("shadow persistence upsert failed gracefully", "place", entry.Title, "error", err)
-			fmt.Printf("SHADOW_UPSERT_ERROR: place=%s err=%v\n", entry.Title, err)
+			log.Warn("shadow persistence upsert failed gracefully", "operation", "upsert_lead", "error_class", ProvenanceErrorClass(err))
 		}
 	}
 }
@@ -677,7 +699,7 @@ func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, 
 	// 2. Link lead to search using CANONICAL place ID ONLY (GATE 3 Fix)
 	if lead.JobID != "" && canonicalPlaceID != "" {
 		if linkErr := w.LinkLeadToSearch(ctx, lead.JobID, canonicalPlaceID, 0); linkErr != nil {
-			log.Warn("shadow persistence link lead to search failed", "search_id", lead.JobID, "canonical_place_id", canonicalPlaceID, "error", linkErr)
+			log.Warn("shadow provenance link failed; continuing lead persistence", "operation", "link_lead_to_search")
 		}
 	}
 

@@ -178,7 +178,8 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 						log.Printf("[DB-FIRST READ PATH HIT] Job %s served %d leads from database search %s", job.ID, len(leads), cachedSearch.SearchID)
 
 						if err := shadowWriter.WriteLeadsToCSVFile(leads, outpath); err == nil {
-							_ = shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+							provenanceOK := true
+							if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
 								SearchID:       job.ID,
 								JobID:          job.ID,
 								JobName:        job.Name,
@@ -187,16 +188,32 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 								Category:       query,
 								RequestedLimit: job.Data.Depth,
 								Status:         "running",
-							})
-
-							for order, lead := range leads {
-								_ = shadowWriter.LinkLeadToSearch(ctx, job.ID, lead.PlaceID, order+1)
+							}); err != nil {
+								provenanceOK = false
+								log.Printf("provenance register failed; falling back to current scraper: operation=register_search search_id=%s", job.ID)
 							}
 
-							_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", "")
+							if provenanceOK {
+								for order, lead := range leads {
+									if err := shadowWriter.LinkLeadToSearch(ctx, job.ID, lead.PlaceID, order+1); err != nil {
+										provenanceOK = false
+										log.Printf("provenance link failed; falling back to current scraper: operation=link_lead_to_search search_id=%s", job.ID)
+										break
+									}
+								}
+							}
 
-							job.Status = web.StatusOK
-							return w.svc.Update(ctx, job)
+							if provenanceOK {
+								if err := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); err != nil {
+									provenanceOK = false
+									log.Printf("provenance status update failed; falling back to current scraper: operation=update_search_status search_id=%s", job.ID)
+								}
+							}
+
+							if provenanceOK {
+								job.Status = web.StatusOK
+								return w.svc.Update(ctx, job)
+							}
 						}
 					} else if len(leads) > 0 {
 						log.Printf("[DB-FIRST READ PATH MISS - PARTIAL RESULT] Job %s requested %d leads but DB only has %d; falling back to Playwright scraper", job.ID, job.Data.Depth, len(leads))
@@ -304,7 +321,9 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 
 			if sw := shadow.NewWriterFromEnv(); sw != nil {
 				if shadowWriter, ok := sw.(*shadow.Writer); ok {
-					_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", err.Error())
+					if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", err.Error()); statusErr != nil {
+						log.Printf("provenance status update failed after scrape error: operation=update_search_status search_id=%s", job.ID)
+					}
 				}
 			}
 
@@ -317,7 +336,9 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	job.Status = web.StatusOK
 	if sw := shadow.NewWriterFromEnv(); sw != nil {
 		if shadowWriter, ok := sw.(*shadow.Writer); ok {
-			_ = shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", "")
+			if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); statusErr != nil {
+				log.Printf("provenance status update failed after successful scrape: operation=update_search_status search_id=%s", job.ID)
+			}
 		}
 	}
 
@@ -374,7 +395,7 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 				if job.Data.Lat != "" && job.Data.Lon != "" {
 					coords = job.Data.Lat + "," + job.Data.Lon
 				}
-				_ = shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+				if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
 					SearchID:       job.ID,
 					JobID:          job.ID,
 					JobName:        job.Name,
@@ -382,7 +403,9 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 					Location:       coords,
 					Category:       strings.Join(job.Data.Keywords, ", "),
 					RequestedLimit: job.Data.Depth,
-				})
+				}); err != nil {
+					log.Printf("provenance register failed; scraper will continue: operation=register_search search_id=%s", job.ID)
+				}
 				writers = append(writers, shadowWriter)
 			}
 		}
