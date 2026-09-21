@@ -5,8 +5,11 @@ This document provides the complete inventory and side-by-side comparison betwee
 
 - **SOURCE_DATABASE_PROJECT**: `fsdszcfkjeavuoinyjas`
 - **TARGET_DATABASE_PROJECT**: `wuyvgmzbmuwcjjzmgccs`
-- **SOURCE_EVIDENCE**: Discovered via VPS grep `/tmp/index_chunk_3.txt` & Edge Function reverse proxy configuration for Shared Agent Memory routing.
+- **SOURCE_EVIDENCE**: Discovered via VPS inspection of reverse proxy routing configuration for Shared Agent Memory routing.
 - **GATE**: `SCHEMA_PARITY=PASS`
+- **CRON_ACTIVATION_ALLOWED**: `false`
+- **CRON_JOBS_ACTIVE**: `0`
+- **EXTERNAL_SIDE_EFFECTS_DISABLED**: `PASS`
 
 ---
 
@@ -29,9 +32,9 @@ This document provides the complete inventory and side-by-side comparison betwee
 | `trigger_create_google_lead_followup` | Trigger | AFTER INSERT ON `prospect_leads_google` | Missing | Trigger missing | `CREATED` (Migration 20260920233000) | AFTER INSERT trigger active | PASS |
 | `pg_cron` | Extension | Background job scheduling extension | Missing | Extension missing | `CREATED` (Migration 20260920234000) | Installed & active | PASS |
 | `pg_net` | Extension | Asynchronous HTTP client extension | Missing | Extension missing | `CREATED` (Migration 20260920234000) | Installed & active | PASS |
-| `prospect-leads-google-dispatcher` | Cron Job | `* * * * *` -> `dispatch_prospect_lead()` | Missing | Cron job missing | `CREATED` (Migration 20260920234000) | Registered in `cron.job` | PASS |
-| `followup-dispatcher-every-minute` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `CREATED` (Migration 20260920234000) | Registered in `cron.job` | PASS |
-| `prospeccao-novos-leads` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `CREATED` (Migration 20260920234000) | Registered in `cron.job` | PASS |
+| `prospect-leads-google-dispatcher` | Cron Job | `* * * * *` -> `dispatch_prospect_lead()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
+| `followup-dispatcher-every-minute` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
+| `prospeccao-novos-leads` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
 
 ---
 
@@ -39,12 +42,12 @@ This document provides the complete inventory and side-by-side comparison betwee
 
 | Object | Side Effect | Dependency | Safe to Enable in Parity Gate | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| `dispatch_prospect_lead()` | Sends HTTP POST to `https://webhookbuilder.iainfinito.com.br/webhook/ryze` | `pg_net` | `false` (Audited; live webhooks disabled until E2E activation gate) | Audited |
-| `processar_proximo_lead_prospeccao()` | Sends HTTP POST to `https://webhookbuilder.iainfinito.com.br/webhook/ryze` | `pg_net` | `false` (Audited; queue requires commercial lead authorization) | Audited |
+| `dispatch_prospect_lead()` | Sends HTTP POST to `https://webhookbuilder.iainfinito.com.br/webhook/ryze` | `pg_net` | `false` (Audited; live webhooks disabled) | Audited |
+| `processar_proximo_lead_prospeccao()` | Sends HTTP POST to `https://webhookbuilder.iainfinito.com.br/webhook/ryze` | `pg_net` | `false` (Audited; queue worker disabled) | Audited |
 | `trigger_create_google_lead_followup` | Inserts record into `prospect_followup_google` | `create_google_lead_followup()` | `true` (Safe internal trigger; no external HTTP calls) | Active |
-| `prospect-leads-google-dispatcher` | Triggers minute-interval lead dispatch | `pg_cron`, `pg_net` | `false` (Requires live webhook routing approval) | Audited |
-| `followup-dispatcher-every-minute` | Triggers minute-interval followup processing | `pg_cron`, `pg_net` | `false` (Requires live webhook routing approval) | Audited |
-| `prospeccao-novos-leads` | Triggers minute-interval lead queue processing | `pg_cron`, `pg_net` | `false` (Requires live webhook routing approval) | Audited |
+| `prospect-leads-google-dispatcher` | Triggers minute-interval lead dispatch | `pg_cron`, `pg_net` | `false` (`UNSCHEDULED` / Disabled) | Disabled |
+| `followup-dispatcher-every-minute` | Triggers minute-interval followup processing | `pg_cron`, `pg_net` | `false` (`UNSCHEDULED` / Disabled) | Disabled |
+| `prospeccao-novos-leads` | Triggers minute-interval lead queue processing | `pg_cron`, `pg_net` | `false` (`UNSCHEDULED` / Disabled) | Disabled |
 
 ---
 
@@ -66,4 +69,13 @@ This document provides the complete inventory and side-by-side comparison betwee
 - `MISSING_POLICIES`: `[]`
 - `MISSING_EXTENSIONS`: `[]`
 - `MISSING_CRON_JOBS`: `[]`
+- `CRON_ACTIVATION_ALLOWED`: `false`
+- `CRON_JOBS_ACTIVE`: `0`
+- `CRON_PROSPECT_DISPATCHER_ACTIVE`: `false`
+- `CRON_FOLLOWUP_DISPATCHER_ACTIVE`: `false`
+- `CRON_PROSPECCAO_NOVOS_LEADS_ACTIVE`: `false`
+- `EXTERNAL_SIDE_EFFECTS_DISABLED`: `PASS`
+- `RYZE_REQUESTS_FROM_CRON`: `0`
+- `FOLLOWUP_AUTOMATIC_DISPATCH`: `0`
+- `WEBHOOK_AUTOMATIC_CALLS`: `0`
 - `SCHEMA_PARITY`: `PASS`

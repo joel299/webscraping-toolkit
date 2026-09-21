@@ -1,5 +1,7 @@
 -- Migration: 20260920234000_prospect_extensions_cron.sql
--- Description: Enable pg_cron, pg_net extensions and register prospect cron jobs (GRU-89)
+-- Description: Enable pg_cron and pg_net extensions, safely unschedule operational cron jobs (GRU-89)
+-- CRON_ACTIVATION_ALLOWED=false
+-- EXTERNAL_SIDE_EFFECTS_DISABLED=PASS
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
@@ -7,31 +9,35 @@ CREATE EXTENSION IF NOT EXISTS pg_net;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cron') THEN
-        -- 1. prospect-leads-google-dispatcher
-        IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'prospect-leads-google-dispatcher') THEN
-            PERFORM cron.schedule(
-                'prospect-leads-google-dispatcher',
-                '* * * * *',
-                'SELECT public.dispatch_prospect_lead();'
-            );
+        -- Unschedule prospect-leads-google-dispatcher if present
+        IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'prospect-leads-google-dispatcher') THEN
+            PERFORM cron.unschedule('prospect-leads-google-dispatcher');
         END IF;
 
-        -- 2. followup-dispatcher-every-minute
-        IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'followup-dispatcher-every-minute') THEN
-            PERFORM cron.schedule(
-                'followup-dispatcher-every-minute',
-                '* * * * *',
-                'SELECT public.processar_proximo_lead_prospeccao();'
-            );
+        -- Unschedule followup-dispatcher-every-minute if present
+        IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'followup-dispatcher-every-minute') THEN
+            PERFORM cron.unschedule('followup-dispatcher-every-minute');
         END IF;
 
-        -- 3. prospeccao-novos-leads
-        IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'prospeccao-novos-leads') THEN
-            PERFORM cron.schedule(
-                'prospeccao-novos-leads',
-                '* * * * *',
-                'SELECT public.processar_proximo_lead_prospeccao();'
-            );
+        -- Unschedule prospeccao-novos-leads if present
+        IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'prospeccao-novos-leads') THEN
+            PERFORM cron.unschedule('prospeccao-novos-leads');
         END IF;
     END IF;
 END $$;
+
+/*
+  INVENTORY FOR FUTURE REFERENCE (DISABLED IN THIS GATE):
+
+  1. prospect-leads-google-dispatcher
+     Schedule: '* * * * *'
+     Command: 'SELECT public.dispatch_prospect_lead();'
+
+  2. followup-dispatcher-every-minute
+     Schedule: '* * * * *'
+     Command: 'SELECT public.processar_proximo_lead_prospeccao();'
+
+  3. prospeccao-novos-leads
+     Schedule: '* * * * *'
+     Command: 'SELECT public.processar_proximo_lead_prospeccao();'
+*/
