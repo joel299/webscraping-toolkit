@@ -1,11 +1,14 @@
 package shadow
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gosom/google-maps-scraper/gmaps"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +69,28 @@ func TestSanitizeDSN(t *testing.T) {
 	sanitized := SanitizeDSN(rawDSN)
 	assert.NotContains(t, sanitized, "SecretPassword123!")
 	assert.Contains(t, sanitized, "*****@aws-0-sa-east-1.pooler.supabase.com:6543/postgres")
+}
+
+func TestProvenanceErrorClass(t *testing.T) {
+	t.Run("context canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		assert.Equal(t, "context_canceled", ProvenanceErrorClass(ctx.Err()))
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+		defer cancel()
+		assert.Equal(t, "context_deadline_exceeded", ProvenanceErrorClass(ctx.Err()))
+	})
+
+	t.Run("postgres error is classified without message", func(t *testing.T) {
+		err := &pgconn.PgError{Code: "23503", Message: "SQLERRM=secret@example.com password=hidden"}
+		classified := ProvenanceErrorClass(err)
+		assert.Equal(t, "postgres_23503", classified)
+		assert.NotContains(t, classified, "SQLERRM")
+		assert.NotContains(t, classified, "secret@example.com")
+	})
 }
 
 func TestLoadDSN(t *testing.T) {

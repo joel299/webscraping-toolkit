@@ -39,6 +39,128 @@ func applyMigrationFiles(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+func newProvenanceFailureTestWriter(t *testing.T) (context.Context, *pgxpool.Pool, *Writer) {
+	t.Helper()
+
+	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
+	if testDSN == "" {
+		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	config, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Skip("Skipping integration test: PostgreSQL configuration is invalid")
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil || pool.Ping(ctx) != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		t.Skip("Skipping integration test: PostgreSQL container ping failed")
+	}
+	t.Cleanup(pool.Close)
+
+	reset := func() {
+		_, err := pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_search_leads CASCADE")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_searches CASCADE")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+		require.NoError(t, err)
+		require.NoError(t, applyMigrationFiles(ctx, pool))
+	}
+	reset()
+
+	return ctx, pool, NewWriter(pool, time.Second, 1)
+}
+
+func TestProvenanceFailureObservability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short unit test run")
+	}
+
+	ctx, pool, writer := newProvenanceFailureTestWriter(t)
+	reset := func() {
+		_, err := pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_search_leads CASCADE")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_searches CASCADE")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "DROP TABLE IF EXISTS public.prospect_leads_google CASCADE")
+		require.NoError(t, err)
+		require.NoError(t, applyMigrationFiles(ctx, pool))
+	}
+
+	t.Run("RegisterSearch success does not degrade", func(t *testing.T) {
+		writer = NewWriter(pool, time.Second, 1)
+		err := writer.RegisterSearch(ctx, &SearchContext{
+			SearchID: "observability-success",
+			JobID:    "observability-job",
+			JobName:  "observability test",
+			Status:   "running",
+		})
+		require.NoError(t, err)
+		metrics := writer.GetMetrics()
+		assert.Equal(t, uint64(0), metrics.ProvenanceFailed)
+		assert.False(t, metrics.ProvenanceDegraded)
+	})
+
+	t.Run("RegisterSearch persistence failure increments once", func(t *testing.T) {
+		reset()
+		writer = NewWriter(pool, time.Second, 1)
+		_, err := pool.Exec(ctx, "DROP TABLE public.prospect_searches CASCADE")
+		require.NoError(t, err)
+		err = writer.RegisterSearch(ctx, &SearchContext{SearchID: "register-failure", JobID: "job", JobName: "test"})
+		require.Error(t, err)
+		metrics := writer.GetMetrics()
+		assert.Equal(t, uint64(1), metrics.ProvenanceFailed)
+		assert.True(t, metrics.ProvenanceDegraded)
+	})
+
+	t.Run("LinkLeadToSearch FK failure increments once", func(t *testing.T) {
+		reset()
+		writer = NewWriter(pool, time.Second, 1)
+		err := writer.LinkLeadToSearch(ctx, "missing-search", "missing-place", 1)
+		require.Error(t, err)
+		metrics := writer.GetMetrics()
+		assert.Equal(t, uint64(1), metrics.ProvenanceFailed)
+		assert.True(t, metrics.ProvenanceDegraded)
+	})
+
+	t.Run("UpdateSearchStatus database failure increments once", func(t *testing.T) {
+		reset()
+		writer = NewWriter(pool, time.Second, 1)
+		_, err := pool.Exec(ctx, "DROP TABLE public.prospect_searches CASCADE")
+		require.NoError(t, err)
+		err = writer.UpdateSearchStatus(ctx, "status-failure", "completed", "")
+		require.Error(t, err)
+		metrics := writer.GetMetrics()
+		assert.Equal(t, uint64(1), metrics.ProvenanceFailed)
+		assert.True(t, metrics.ProvenanceDegraded)
+	})
+
+	t.Run("shadow continuity preserves scraping after provenance failure", func(t *testing.T) {
+		reset()
+		writer = NewWriter(pool, time.Second, 1)
+		writer.SetJobContext("missing-search", "continuity test")
+		results := make(chan scrapemate.Result, 1)
+		results <- scrapemate.Result{Data: &gmaps.Entry{ID: "continuity-place", Title: "Continuity Test"}}
+		close(results)
+
+		var runErr error
+		assert.NotPanics(t, func() {
+			runErr = writer.Run(ctx, results)
+		})
+		require.NoError(t, runErr)
+		metrics := writer.GetMetrics()
+		assert.Equal(t, uint64(1), metrics.ProvenanceFailed)
+		assert.True(t, metrics.ProvenanceDegraded)
+	})
+}
+
 func TestIntegrationScalingProgression(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short unit test run")
