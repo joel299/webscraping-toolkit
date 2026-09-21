@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestFanoutResultWriterDeliversEveryResultToEveryWriter(t *testing.T) {
+	first := &recordingResultWriter{}
+	second := &recordingResultWriter{}
+	writer := fanoutResultWriter{writers: []scrapemate.ResultWriter{first, second}}
+	input := make(chan scrapemate.Result, 3)
+	for i := range 3 {
+		input <- scrapemate.Result{Data: i}
+	}
+	close(input)
+
+	if err := writer.Run(context.Background(), input); err != nil {
+		t.Fatalf("fanout Run: %v", err)
+	}
+
+	if got := first.count(); got != 3 {
+		t.Fatalf("first writer received %d results, want 3", got)
+	}
+	if got := second.count(); got != 3 {
+		t.Fatalf("second writer received %d results, want 3", got)
+	}
+}
+
+type recordingResultWriter struct {
+	mu      sync.Mutex
+	results []scrapemate.Result
+}
+
+func (w *recordingResultWriter) Run(_ context.Context, in <-chan scrapemate.Result) error {
+	for result := range in {
+		w.mu.Lock()
+		w.results = append(w.results, result)
+		w.mu.Unlock()
+	}
+	return nil
+}
+
+func (w *recordingResultWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.results)
+}
 
 func TestNewWebRunnerReusesAndClosesShadowWriter(t *testing.T) {
 	t.Setenv("PROSPECT_DATABASE_URL", "")

@@ -38,6 +38,64 @@ type mateRunner interface {
 	Close() error
 }
 
+type fanoutResultWriter struct {
+	writers []scrapemate.ResultWriter
+}
+
+func (w fanoutResultWriter) Run(ctx context.Context, in <-chan scrapemate.Result) error {
+	if len(w.writers) == 0 {
+		return nil
+	}
+
+	fanoutCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	channels := make([]chan scrapemate.Result, len(w.writers))
+	egroup, groupCtx := errgroup.WithContext(fanoutCtx)
+	for i, writer := range w.writers {
+		channels[i] = make(chan scrapemate.Result)
+		resultChannel := channels[i]
+		egroup.Go(func() error {
+			return writer.Run(groupCtx, resultChannel)
+		})
+	}
+
+	for {
+		select {
+		case <-groupCtx.Done():
+			for _, resultChannel := range channels {
+				close(resultChannel)
+			}
+			return egrouperror(egroup.Wait())
+		case result, ok := <-in:
+			if !ok {
+				for _, resultChannel := range channels {
+					close(resultChannel)
+				}
+				return egroup.Wait()
+			}
+
+			for _, resultChannel := range channels {
+				select {
+				case resultChannel <- result:
+				case <-groupCtx.Done():
+					for _, channel := range channels {
+						close(channel)
+					}
+					return egrouperror(egroup.Wait())
+				}
+			}
+		}
+	}
+}
+
+func egrouperror(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
 func New(cfg *runner.Config) (runner.Runner, error) {
 	if cfg.DataFolder == "" {
 		return nil, fmt.Errorf("data folder is required")
@@ -396,7 +454,7 @@ func defaultSetupMate(cfg *runner.Config, shadowWriter *shadow.Writer) func(cont
 			}); err != nil {
 				log.Printf("provenance register failed; scraper will continue: operation=register_search search_id=%s", job.ID)
 			}
-			writers = append(writers, shadowWriter)
+			writers = []scrapemate.ResultWriter{fanoutResultWriter{writers: []scrapemate.ResultWriter{csvWriter, shadowWriter}}}
 		}
 
 		matecfg, err := scrapemateapp.NewConfig(
