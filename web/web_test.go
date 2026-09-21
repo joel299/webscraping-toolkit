@@ -144,7 +144,7 @@ func newTestServerWithRepo(t *testing.T, repo JobRepository) *Server {
 	return srv
 }
 
-func TestGetJobsHTMXTriggerIsPollingOnly(t *testing.T) {
+func TestGetJobsHTMXTriggerIncludesRefreshAndPolling(t *testing.T) {
 	srv := newTestServerWithRepo(t, &mockJobRepo{jobs: paginatedJobs(1)})
 
 	req := httptest.NewRequest(http.MethodGet, "/jobs", http.NoBody)
@@ -163,8 +163,8 @@ func TestGetJobsHTMXTriggerIsPollingOnly(t *testing.T) {
 		t.Fatal("job_rows.html must not use hx-trigger=\"load\" — it causes an HTMX outerHTML reload loop")
 	}
 
-	if !strings.Contains(body, `hx-trigger="every 10s"`) {
-		t.Fatal("job_rows.html must use hx-trigger=\"every 10s\" for periodic polling")
+	if !strings.Contains(body, `hx-trigger="refresh, every 10s"`) {
+		t.Fatal("job_rows.html must use the custom refresh trigger with the periodic polling fallback")
 	}
 
 	if !strings.Contains(body, `hx-delete="/delete?id=00000000-0000-0000-0000-000000000001&page=1"`) {
@@ -190,6 +190,10 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 
 	if !strings.Contains(body, `hx-swap="outerHTML"`) {
 		t.Fatal("scrape form must replace the paginated job body")
+	}
+
+	if !strings.Contains(body, "htmx:afterRequest") || !strings.Contains(body, "htmx.trigger(tbody, 'refresh')") {
+		t.Fatal("scrape form must trigger a post-create job refresh")
 	}
 }
 

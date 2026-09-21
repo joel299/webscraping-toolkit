@@ -367,6 +367,19 @@
             }
         });
 
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            const detail = evt.detail;
+            if (!detail || !detail.successful || !detail.elt || detail.elt.id !== 'scrape-form') return;
+
+            // The POST response replaces the tbody with the newly created pending job.
+            // Refresh once after the swap so a worker claim is visible without a full reload;
+            // the tbody's every-10s trigger remains the fallback for later transitions.
+            setTimeout(() => {
+                const tbody = document.getElementById('job-tbody');
+                if (tbody && window.htmx) htmx.trigger(tbody, 'refresh');
+            }, 500);
+        });
+
         // GLOBAL LEADS ENGINE
         var globalLeadsData = [];
         var globalLeadsMap = null;
