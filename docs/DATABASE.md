@@ -38,10 +38,11 @@ When a lead is re-scraped, existing non-empty values for `website`, `phone`, `wh
 2. `supabase/migrations/20260920161000_prospect_leads_google_rls.sql`: Row Level Security enabled, `anon`/`authenticated` direct access revoked.
 3. `supabase/migrations/20260920190000_prospect_searches_provenance.sql`: Created `public.prospect_searches` and `public.prospect_search_leads` schemas, constraints, FKs, and indexes.
 4. `supabase/migrations/20260920191000_prospect_searches_rls.sql`: Row Level Security enabled on both new tables.
-5. `supabase/migrations/20260920193000_prospect_searches_hardening.sql`: Explicitly revoked `authenticated` role permissions on `prospect_searches` and `prospect_search_leads`, enforced status `CHECK` constraint (`created`, `running`, `completed`, `failed`), and implemented strict least privilege by revoking `DELETE` permissions (granting `SELECT, INSERT, UPDATE` only).
+5. `supabase/migrations/20260920193000_prospect_searches_hardening.sql`: Explicitly revoked `authenticated` role permissions on `prospect_searches` and `prospect_search_leads`, and enforced status `CHECK` constraint (`created`, `running`, `completed`, `failed`).
+6. `supabase/migrations/20260920202000_prospect_searches_revoke_delete.sql`: Explicitly executed `REVOKE DELETE` on `prospect_searches` and `prospect_search_leads` for `postgres`, `service_role`, `anon`, and `authenticated`, enforcing strict least privilege (`SELECT, INSERT, UPDATE` only).
 
 ## Row Level Security (RLS) & Least Privilege
 - RLS Status: Enabled on all tables (`relrowsecurity = true`, `relforcerowsecurity = true`).
 - Direct client access: `anon` and `authenticated` roles are explicitly **REVOKED** (`DENIED`).
-- Backend writer access: Least-privilege (`SELECT, INSERT, UPDATE`) granted to `postgres` and `service_role` (`DELETE` revoked). No public client access exposed via Supabase.
+- Backend writer access: Least-privilege (`SELECT, INSERT, UPDATE`) granted to `postgres` and `service_role` (`DELETE` explicitly revoked and denied). No public client access exposed via Supabase.
 
