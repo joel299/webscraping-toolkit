@@ -399,13 +399,13 @@ func defaultSetupMate(cfg *runner.Config, shadowWriter *shadow.Writer) func(cont
 				coords = job.Data.Lat + "," + job.Data.Lon
 			}
 			if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
-					SearchID:       job.ID,
-					JobID:          job.ID,
-					JobName:        job.Name,
-					Query:          strings.Join(job.Data.Keywords, ", "),
-					Location:       coords,
-					Category:       strings.Join(job.Data.Keywords, ", "),
-					RequestedLimit: job.Data.Depth,
+				SearchID:       job.ID,
+				JobID:          job.ID,
+				JobName:        job.Name,
+				Query:          strings.Join(job.Data.Keywords, ", "),
+				Location:       coords,
+				Category:       strings.Join(job.Data.Keywords, ", "),
+				RequestedLimit: job.Data.Depth,
 			}); err != nil {
 				log.Printf("provenance register failed; scraper will continue: operation=register_search search_id=%s", job.ID)
 			}
