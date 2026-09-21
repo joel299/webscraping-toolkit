@@ -39,6 +39,30 @@ func TestFanoutResultWriterDeliversEveryResultToEveryWriter(t *testing.T) {
 	}
 }
 
+func TestFanoutResultWriterDrainsAfterContextCancellation(t *testing.T) {
+	first := &recordingResultWriter{}
+	second := &recordingResultWriter{}
+	writer := fanoutResultWriter{writers: []scrapemate.ResultWriter{first, second}}
+	ctx, cancel := context.WithCancel(context.Background())
+	input := make(chan scrapemate.Result, 3)
+	input <- scrapemate.Result{Data: 1}
+	cancel()
+	input <- scrapemate.Result{Data: 2}
+	input <- scrapemate.Result{Data: 3}
+	close(input)
+
+	if err := writer.Run(ctx, input); err != nil {
+		t.Fatalf("fanout Run after cancellation: %v", err)
+	}
+
+	if got := first.count(); got != 3 {
+		t.Fatalf("first writer received %d results, want 3", got)
+	}
+	if got := second.count(); got != 3 {
+		t.Fatalf("second writer received %d results, want 3", got)
+	}
+}
+
 type recordingResultWriter struct {
 	mu      sync.Mutex
 	results []scrapemate.Result

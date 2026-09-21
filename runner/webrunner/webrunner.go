@@ -47,7 +47,7 @@ func (w fanoutResultWriter) Run(ctx context.Context, in <-chan scrapemate.Result
 		return nil
 	}
 
-	fanoutCtx, cancel := context.WithCancel(ctx)
+	fanoutCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	channels := make([]chan scrapemate.Result, len(w.writers))
@@ -60,30 +60,44 @@ func (w fanoutResultWriter) Run(ctx context.Context, in <-chan scrapemate.Result
 		})
 	}
 
+	closeChannels := func() {
+		for _, resultChannel := range channels {
+			close(resultChannel)
+		}
+	}
+	dispatch := func(result scrapemate.Result) error {
+		for _, resultChannel := range channels {
+			select {
+			case resultChannel <- result:
+			case <-groupCtx.Done():
+				return groupCtx.Err()
+			}
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case <-groupCtx.Done():
-			for _, resultChannel := range channels {
-				close(resultChannel)
-			}
+			closeChannels()
 			return egrouperror(egroup.Wait())
-		case result, ok := <-in:
-			if !ok {
-				for _, resultChannel := range channels {
-					close(resultChannel)
-				}
-				return egroup.Wait()
-			}
-
-			for _, resultChannel := range channels {
-				select {
-				case resultChannel <- result:
-				case <-groupCtx.Done():
-					for _, channel := range channels {
-						close(channel)
-					}
+		case <-ctx.Done():
+			for result := range in {
+				if err := dispatch(result); err != nil {
+					closeChannels()
 					return egrouperror(egroup.Wait())
 				}
+			}
+			closeChannels()
+			return egroup.Wait()
+		case result, ok := <-in:
+			if !ok {
+				closeChannels()
+				return egroup.Wait()
+			}
+			if err := dispatch(result); err != nil {
+				closeChannels()
+				return egrouperror(egroup.Wait())
 			}
 		}
 	}
