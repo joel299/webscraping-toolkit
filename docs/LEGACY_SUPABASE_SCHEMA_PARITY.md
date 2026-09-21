@@ -25,6 +25,10 @@ This document records the reconstructed target baseline and direct runtime valid
 - **SERVICE_ROLE_EFFECTIVE_DELETE**: DENIED_FOR_PROVENANCE
 - **ANON_ACCESS**: DENIED
 - **AUTHENTICATED_ACCESS**: DENIED
+- **OPERATIONAL_BASELINE_ACCEPTED_BY_OWNER**: PASS
+- **OPERATIONAL_SCHEMA_REFERENCE**: RECONSTRUCTED_BASELINE
+- **SOURCE_GATE_OWNER_OVERRIDE**: PASS
+- **USER_ACCEPTANCE_PROVENANCE**: READY (human test not yet executed)
 
 ---
 
@@ -57,6 +61,33 @@ As required by GRU-89 guidelines:
 `COLUMNS_PRESENT_OUTSIDE_RECONSTRUCTED_BASELINE=[]`
 
 The 23-column list identifies the difference from the stale 61-column manifest only. It does not identify a historical source or justify historical parity.
+
+## Operational Baseline Owner Decision
+
+The owner formally accepted the reconstructed, versioned baseline as the project's operational reference after the historical source search was exhausted. This decision does not establish historical parity and does not identify a source database.
+
+- `SOURCE_DATABASE_PROJECT=UNKNOWN`
+- `SOURCE_DATABASE_IDENTIFIED=FAIL`
+- `SOURCE_SEARCH_EXHAUSTED=PASS`
+- `HISTORICAL_SOURCE_PARITY=UNVERIFIABLE`
+- `RECONSTRUCTED_BASELINE_STATUS=VERIFIED`
+- `OPERATIONAL_BASELINE_ACCEPTED_BY_OWNER=PASS`
+- `OPERATIONAL_SCHEMA_REFERENCE=RECONSTRUCTED_BASELINE`
+- `TARGET_RUNTIME_VALIDATION=PASS`
+- `SOURCE_GATE_OWNER_OVERRIDE=PASS`
+- `SOURCE_GATE_OVERRIDE_REASON=HISTORICAL_SOURCE_UNRECOVERABLE_AFTER_EXHAUSTED_SEARCH`
+- `USER_ACCEPTANCE_PROVENANCE=READY`
+
+### TESTE HUMANO 01 — prepared, not executed
+
+The human acceptance scenario is prepared with:
+
+- category: `Hamburgueria`;
+- city: `Campo Grande, MS`;
+- quantity: `3` leads;
+- mode: `PROSPECT_READ_MODE=current`.
+
+The human test must validate search creation, job start, three real leads, UI results, map behavior, database persistence, search-to-lead provenance, absence of unintended duplicates, and continued absence of cron/external side effects. `USER_ACCEPTANCE_PROVENANCE=READY` is not a pass result; the visual and operational acceptance remains pending human execution.
 
 ---
 
