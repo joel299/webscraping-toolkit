@@ -196,8 +196,12 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 		t.Fatal("scrape form must trigger a post-create job refresh")
 	}
 
-	if !strings.Contains(body, `onclick="prepareFormSubmission()"`) {
-		t.Fatal("scrape form must prepare derived fields before htmx serializes the request")
+	if !strings.Contains(body, `onsubmit="prepareFormSubmission()"`) {
+		t.Fatal("scrape form must prepare derived fields for every submit path")
+	}
+
+	if strings.Contains(body, `onclick="prepareFormSubmission()"`) {
+		t.Fatal("submit preparation must not depend on the button click handler")
 	}
 }
 

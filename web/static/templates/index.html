@@ -167,6 +167,7 @@
                     hx-target="#job-tbody"
                     hx-swap="outerHTML"
                     hx-indicator="#spinner"
+                    onsubmit="prepareFormSubmission()"
                     hx-on::before-request="prepareFormSubmission(); document.getElementById('error-container').innerHTML = ''; closeDrawer();"
                     hx-on::after-request="if(!event.detail.successful) { openDrawer(); document.getElementById('error-container').innerHTML = event.detail.xhr.responseText; }"
                 >
@@ -224,7 +225,7 @@
 
                     <div class="drawer-footer" style="padding-top: 1rem; border-top: 1px solid var(--color-border); margin-top: 1.5rem;">
                         <button type="button" class="btn btn-outline" onclick="closeDrawer()">Cancelar</button>
-                        <button type="submit" class="btn btn-primary" onclick="prepareFormSubmission()">Iniciar busca</button>
+                        <button type="submit" class="btn btn-primary">Iniciar busca</button>
                     </div>
                 </form>
             </div>
