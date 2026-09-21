@@ -109,53 +109,40 @@ func (w *webrunner) work(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			jobs, err := w.svc.SelectPending(ctx)
+			job, err := w.svc.ClaimPending(ctx)
 			if err != nil {
+				if errors.Is(err, web.ErrNoJobAvailable) {
+					log.Printf("JOB_CLAIM_SKIPPED reason=no_job_available")
+					continue
+				}
 				return err
 			}
 
-			for i := range jobs {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-					t0 := time.Now().UTC()
-					if err := w.scrapeJob(ctx, &jobs[i]); err != nil {
-						params := map[string]any{
-							"job_count": len(jobs[i].Data.Keywords),
-							"duration":  time.Now().UTC().Sub(t0).String(),
-							"error":     err.Error(),
-						}
-
-						evt := tlmt.NewEvent("web_runner", params)
-
-						_ = runner.Telemetry().Send(ctx, evt)
-
-						log.Printf("error scraping job %s: %v", jobs[i].ID, err)
-					} else {
-						params := map[string]any{
-							"job_count": len(jobs[i].Data.Keywords),
-							"duration":  time.Now().UTC().Sub(t0).String(),
-						}
-
-						_ = runner.Telemetry().Send(ctx, tlmt.NewEvent("web_runner", params))
-
-						log.Printf("job %s scraped successfully", jobs[i].ID)
-					}
+			log.Printf("JOB_CLAIMED job_id=%s", job.ID)
+			t0 := time.Now().UTC()
+			if err := w.scrapeJob(ctx, job); err != nil {
+				params := map[string]any{
+					"job_count": len(job.Data.Keywords),
+					"duration":  time.Now().UTC().Sub(t0).String(),
+					"error":     err.Error(),
 				}
+
+				_ = runner.Telemetry().Send(ctx, tlmt.NewEvent("web_runner", params))
+				log.Printf("error scraping job %s: %v", job.ID, err)
+			} else {
+				params := map[string]any{
+					"job_count": len(job.Data.Keywords),
+					"duration":  time.Now().UTC().Sub(t0).String(),
+				}
+
+				_ = runner.Telemetry().Send(ctx, tlmt.NewEvent("web_runner", params))
+				log.Printf("job %s scraped successfully", job.ID)
 			}
 		}
 	}
 }
 
 func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
-	job.Status = web.StatusWorking
-
-	err := w.svc.Update(ctx, job)
-	if err != nil {
-		return err
-	}
-
 	if len(job.Data.Keywords) == 0 {
 		job.Status = web.StatusFailed
 

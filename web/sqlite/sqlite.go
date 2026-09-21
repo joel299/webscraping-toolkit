@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	_ "modernc.org/sqlite" // sqlite driver
@@ -108,6 +109,31 @@ func (repo *repo) Select(ctx context.Context, params web.SelectParams) ([]web.Jo
 	}
 
 	return ans, nil
+}
+
+func (repo *repo) ClaimPending(ctx context.Context) (*web.Job, error) {
+	const q = `
+		UPDATE jobs
+		SET status = ?, updated_at = ?
+		WHERE id = (
+			SELECT id FROM jobs
+			WHERE status = ?
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		)
+		AND status = ?
+		RETURNING id, name, status, data, created_at, updated_at`
+
+	row := repo.db.QueryRowContext(ctx, q, web.StatusWorking, time.Now().UTC().Unix(), web.StatusPending, web.StatusPending)
+	job, err := rowToJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, web.ErrNoJobAvailable
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &job, nil
 }
 
 func (repo *repo) Count(ctx context.Context, params web.SelectParams) (int, error) {

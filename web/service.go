@@ -101,6 +101,16 @@ func (s *Service) Get(ctx context.Context, id string) (Job, error) {
 	return s.repo.Get(ctx, id)
 }
 
+// ClaimPending atomically transitions one pending job to working.
+func (s *Service) ClaimPending(ctx context.Context) (*Job, error) {
+	claimer, ok := s.repo.(JobClaimer)
+	if !ok {
+		return nil, fmt.Errorf("job repository does not support atomic claiming")
+	}
+
+	return claimer.ClaimPending(ctx)
+}
+
 func (s *Service) Delete(ctx context.Context, id string) error {
 	datapath, err := s.csvPath(id)
 	if err != nil {

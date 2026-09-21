@@ -8,6 +8,8 @@ import (
 
 var jobs []Job
 
+var ErrNoJobAvailable = errors.New("no job available")
+
 const (
 	StatusPending = "pending"
 	StatusWorking = "working"
@@ -40,6 +42,11 @@ type JobRepository interface {
 	Delete(context.Context, string) error
 	Select(context.Context, SelectParams) ([]Job, error)
 	Update(context.Context, *Job) error
+}
+
+// JobClaimer atomically claims one pending job for processing.
+type JobClaimer interface {
+	ClaimPending(context.Context) (*Job, error)
 }
 
 type Job struct {
