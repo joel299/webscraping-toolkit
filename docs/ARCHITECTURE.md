@@ -22,7 +22,7 @@ UI (Scrape Request)
 ## Key Architectural Principles
 
 1. **Feature Flag Scoping (`PROSPECT_READ_MODE`)**: Server-side configuration controlling DB read-path interception. Default `current` forces full execution via Gosom scraper -> shadow persistence -> provenance. Setting `database` enables DB-first cache read path.
-2. **Partial Result Guard (GATE 2)**: Database-first cache HIT is strictly denied if `available_leads < requested_limit`, forcing a fresh scrape to obtain the full requested depth.
+2. **Global Leads Cache (`PROSPECT_CACHE_ENABLED`)**: Optional Redis acceleration for `GET /api/v1/leads` only. PostgreSQL remains the source of truth; Redis failures fall back to PostgreSQL, keys include pagination, TTL is 45 seconds, and populated keys are invalidated after successful persistence.
 3. **Canonical Place ID Identity Linking (GATE 3)**: Lead identity resolution (place_id -> cid -> whatsapp) returns the exact `CanonicalPlaceID` created/updated in `public.prospect_leads_google`, ensuring `LinkLeadToSearch` links only valid canonical IDs.
 4. **Search to Lead Provenance**: Every search request creates a `prospect_searches` record (`search_id`, `job_id`, `query`, `location`, `requested_limit`, `status`, `started_at`, `completed_at`). Every lead saved creates a relation in `prospect_search_leads` linking `search_id` to `canonical_place_id`.
 5. **Incremental Shadow Persistence**: Leads and their search provenance links are mapped, validated, and flushed in batches during scraping without waiting for the job to complete.
@@ -35,4 +35,3 @@ UI (Scrape Request)
 ## Shadow Writer Lifecycle (GRU-92)
 
 The web runner creates one `shadow.Writer` during runner construction and reuses it for database-first reads, search registration, result persistence, and status updates across jobs. `NewWriterFromEnv` is not called from individual jobs. The writer owns and closes the environment-created `pgxpool.Pool` during runner shutdown; writers created with `NewWriter(pool, ...)` borrow the caller-owned pool. `Close` is idempotent, and operations after close return `ErrWriterClosed`.
-

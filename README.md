@@ -217,6 +217,8 @@ go run . -web -addr :8086 -data-folder webdata
 | `PROSPECT_DATABASE_URL_FILE` | Não | Caminho para arquivo contendo a DSN PostgreSQL. Preferido para secrets. |
 | `PROSPECT_DATABASE_URL` | Não | DSN PostgreSQL direta. Use apenas em ambiente seguro. |
 | `PROSPECT_READ_MODE` | Não | `current` ou `database`. Default efetivo: `current`. |
+| `PROSPECT_CACHE_ENABLED` | Não | `true`/`1` habilita o cache Redis somente para `GET /api/v1/leads`; default `false`. |
+| `PROSPECT_REDIS_URL` | Não | URL do Redis local; default `redis://127.0.0.1:6379/0`. Redis é apenas aceleração; PostgreSQL permanece a fonte de verdade. |
 | `DISABLE_TELEMETRY` | Não | Use `1` para desabilitar telemetria do motor upstream. |
 | `PLAYWRIGHT_INSTALL_ONLY` | Não | Use `1` para executar apenas a instalação do Chromium via Playwright. |
 
@@ -321,9 +323,7 @@ O workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) executa 
 
 A arquitetura de provenance, atomic claim, fanout e persistência incremental está implementada e coberta por testes.
 
-O read path database-first existe atrás de `PROSPECT_READ_MODE=database` e permanece sob validação controlada. O modo `current` continua sendo a referência segura/default até conclusão dessa validação.
-
-Redis/cache/freshness não fazem parte do read path ativo desta fase.
+O read path database-first existe atrás de `PROSPECT_READ_MODE=database`. Quando `PROSPECT_CACHE_ENABLED=true`, somente `GET /api/v1/leads` usa Redis local com chave versionada por paginação e TTL de 45 segundos; miss, erro, entrada corrompida ou Redis indisponível fazem fallback transparente para PostgreSQL. O modo `current` e o cache permanecem desabilitados por padrão.
 
 ## Contribuição
 

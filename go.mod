@@ -24,6 +24,7 @@ require (
 	github.com/mxschmitt/playwright-go v0.6100.0
 	github.com/posthog/posthog-go v1.5.2
 	github.com/pquerna/otp v1.5.0
+	github.com/redis/go-redis/v9 v9.7.3
 	github.com/riverqueue/river v0.30.1
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.30.1
 	github.com/riverqueue/river/rivertype v0.30.1
@@ -126,6 +127,7 @@ require (
 	github.com/dave/dst v0.27.3 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/denis-tingaikin/go-header v0.5.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect

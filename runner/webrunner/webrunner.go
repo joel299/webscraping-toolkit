@@ -26,11 +26,12 @@ import (
 )
 
 type webrunner struct {
-	srv          *web.Server
-	svc          *web.Service
-	cfg          *runner.Config
-	setupMate    func(context.Context, io.Writer, *web.Job) (mateRunner, error)
-	shadowWriter *shadow.Writer
+	srv              *web.Server
+	svc              *web.Service
+	cfg              *runner.Config
+	setupMate        func(context.Context, io.Writer, *web.Job) (mateRunner, error)
+	shadowWriter     *shadow.Writer
+	globalLeadsCache io.Closer
 }
 
 type mateRunner interface {
@@ -134,6 +135,19 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 	}
 
 	svc := web.NewService(repo, cfg.DataFolder)
+	var globalLeadsCache io.Closer
+	if cacheEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("PROSPECT_CACHE_ENABLED")), "true") || os.Getenv("PROSPECT_CACHE_ENABLED") == "1"; cacheEnabled {
+		redisCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cache, cacheErr := web.NewRedisGlobalLeadsCache(redisCtx, os.Getenv("PROSPECT_REDIS_URL"))
+		cancel()
+		if cacheErr != nil {
+			log.Printf("CACHE_ERROR endpoint=global_leads reason=redis_unavailable")
+		} else {
+			svc.SetGlobalLeadsCache(cache)
+			globalLeadsCache = cache
+			log.Printf("CACHE_ENABLED endpoint=global_leads ttl_seconds=45")
+		}
+	}
 	if shadowWriter != nil {
 		svc.SetDatabaseReader(databaseReader{writer: shadowWriter})
 	}
@@ -143,15 +157,19 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 		if shadowWriter != nil {
 			_ = shadowWriter.Close()
 		}
+		if globalLeadsCache != nil {
+			_ = globalLeadsCache.Close()
+		}
 		return nil, err
 	}
 
 	ans := webrunner{
-		srv:          srv,
-		svc:          svc,
-		cfg:          cfg,
-		setupMate:    defaultSetupMate(cfg, shadowWriter),
-		shadowWriter: shadowWriter,
+		srv:              srv,
+		svc:              svc,
+		cfg:              cfg,
+		setupMate:        defaultSetupMate(cfg, shadowWriter),
+		shadowWriter:     shadowWriter,
+		globalLeadsCache: globalLeadsCache,
 	}
 
 	return &ans, nil
@@ -172,10 +190,16 @@ func (w *webrunner) Run(ctx context.Context) error {
 }
 
 func (w *webrunner) Close(context.Context) error {
+	var closeErr error
 	if w.shadowWriter != nil {
-		return w.shadowWriter.Close()
+		closeErr = w.shadowWriter.Close()
 	}
-	return nil
+	if w.globalLeadsCache != nil {
+		if err := w.globalLeadsCache.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 func (w *webrunner) work(ctx context.Context) error {
@@ -286,6 +310,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 
 						if provenanceOK {
 							job.Status = web.StatusOK
+							w.svc.InvalidateGlobalLeadsCache(ctx)
 							return w.svc.Update(ctx, job)
 						}
 					}
@@ -410,6 +435,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 			log.Printf("provenance status update failed after successful scrape: operation=update_search_status search_id=%s", job.ID)
 		}
 	}
+	w.svc.InvalidateGlobalLeadsCache(ctx)
 
 	return w.svc.Update(ctx, job)
 }

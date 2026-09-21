@@ -6,12 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Service struct {
-	repo       JobRepository
-	dataFolder string
-	database   DatabaseReader
+	repo                 JobRepository
+	dataFolder           string
+	database             DatabaseReader
+	globalLeadsCache     GlobalLeadsCache
+	globalLeadsMetrics   globalLeadsCacheMetrics
+	globalLeadsCacheMu   sync.Mutex
+	globalLeadsCacheKeys map[string]struct{}
 }
 
 type jobCounter interface {
@@ -20,8 +25,9 @@ type jobCounter interface {
 
 func NewService(repo JobRepository, dataFolder string) *Service {
 	return &Service{
-		repo:       repo,
-		dataFolder: dataFolder,
+		repo:                 repo,
+		dataFolder:           dataFolder,
+		globalLeadsCacheKeys: make(map[string]struct{}),
 	}
 }
 
@@ -107,18 +113,6 @@ func (s *Service) ListJobs(ctx context.Context, page, limit int) (JobPage, error
 	}
 
 	return ans, nil
-}
-
-// ListGlobalLeads returns a bounded, server-deduplicated read model.
-func (s *Service) ListGlobalLeads(ctx context.Context, limit, offset int) (GlobalLeadsPage, error) {
-	if databaseReadMode() {
-		if s.database == nil {
-			return GlobalLeadsPage{}, fmt.Errorf("database read mode is unavailable")
-		}
-		return s.database.ListGlobalLeads(ctx, limit, offset)
-	}
-
-	return GlobalLeadsPage{}, fmt.Errorf("global leads database read mode is unavailable")
 }
 
 func (s *Service) countJobs(ctx context.Context, params SelectParams) (int, error) {
