@@ -195,6 +195,10 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 	if !strings.Contains(body, "htmx:afterRequest") || !strings.Contains(body, "htmx.trigger(tbody, 'refresh')") {
 		t.Fatal("scrape form must trigger a post-create job refresh")
 	}
+
+	if !strings.Contains(body, `onclick="prepareFormSubmission()"`) {
+		t.Fatal("scrape form must prepare derived fields before htmx serializes the request")
+	}
 }
 
 func TestScrapeRendersFirstPageAfterCreatingJob(t *testing.T) {
