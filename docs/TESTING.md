@@ -7,6 +7,7 @@
 - `TestSanitizeDSN`: Verifies regex masking of passwords in DSN connection strings.
 - `TestLoadDSN`: Verifies loading DSN server-side from secret files.
 - `TestNewDisabledWriter`: Ensures disabled writer initialization operates without errors.
+- `TestWriterCloseIsIdempotentAndRejectsUse`: Verifies safe repeated close and no use after close.
 - `TestProspectLeadMapperAndValidator`: Tests mapping of `gmaps.Entry` to `ProspectLead`, place_id identity fallbacks, and validator constraint rules.
 
 ### 2. Integration Tests (`shadow/integration_test.go`)
@@ -33,6 +34,7 @@
   - Validates Partial Result Guard (`requested=20`, `available=3` -> HIT denied, forces scrape).
   - Validates exact match query retrieval and canonical lead fetching from `prospect_search_leads` JOIN `prospect_leads_google`.
   - Verifies CSV file generation matching `gmaps.Entry` header specifications.
+- `TestNewWebRunnerReusesAndClosesShadowWriter`: Verifies the web runner owns one reusable shadow writer and closes it safely during shutdown.
 
 ### 3. CI Pipeline Integration (GitHub Actions)
 - PostgreSQL 16 service container listening on port `5439:5432`.
@@ -48,4 +50,3 @@
 - `PROVENANCE_FAILED`: 0
 - `UI_REGRESSION`: 0
 - `MAP_REGRESSION`: 0
-

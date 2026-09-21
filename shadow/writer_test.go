@@ -111,6 +111,17 @@ func TestNewDisabledWriter(t *testing.T) {
 	assert.True(t, w.disabled)
 }
 
+func TestWriterCloseIsIdempotentAndRejectsUse(t *testing.T) {
+	w := NewWriter(nil, time.Second, 1)
+
+	assert.NoError(t, w.Close())
+	assert.NoError(t, w.Close())
+
+	_, err := w.FindCompletedSearch(context.Background(), "query", "location")
+	assert.ErrorIs(t, err, ErrWriterClosed)
+	assert.ErrorIs(t, w.Run(context.Background(), nil), ErrWriterClosed)
+}
+
 func TestProspectLeadMapperAndValidator(t *testing.T) {
 	mapper := NewProspectLeadMapper()
 	validator := NewProspectLeadValidator()

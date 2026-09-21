@@ -253,6 +253,9 @@ func (w *Writer) markProvenanceFailure(operation string, err error) {
 
 // RegisterSearch registers or updates a search in public.prospect_searches (GATE 7 & GATE 8)
 func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
 	if s == nil || w.pool == nil || w.disabled {
 		return nil
 	}
@@ -320,6 +323,9 @@ func (w *Writer) RegisterSearch(ctx context.Context, s *SearchContext) error {
 
 // UpdateSearchStatus updates status and completion time in public.prospect_searches (GATE 7)
 func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMsg string) error {
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
 	if searchID == "" || w.pool == nil || w.disabled {
 		return nil
 	}
@@ -364,6 +370,9 @@ func (w *Writer) UpdateSearchStatus(ctx context.Context, searchID, status, errMs
 
 // LinkLeadToSearch connects a canonical lead to a search request in public.prospect_search_leads (FASE 7)
 func (w *Writer) LinkLeadToSearch(ctx context.Context, searchID, placeID string, resultOrder int) error {
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
 	if searchID == "" || placeID == "" || w.pool == nil || w.disabled {
 		return nil
 	}
@@ -399,6 +408,9 @@ func (w *Writer) LinkLeadToSearch(ctx context.Context, searchID, placeID string,
 }
 
 func (w *Writer) Run(ctx context.Context, in <-chan scrapemate.Result) error {
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
 	if w.disabled {
 		for range in {
 			// Consume channel silently
@@ -472,6 +484,9 @@ func (w *Writer) flushBatch(ctx context.Context, entries []*gmaps.Entry) {
 // 2. cid (if non-empty)
 // 3. whatsapp (if non-empty)
 func (w *Writer) ResolveIdentity(ctx context.Context, lead *ProspectLead) (string, error) {
+	if err := w.ensureOpen(); err != nil {
+		return "", err
+	}
 	if lead == nil || w.pool == nil {
 		return "", nil
 	}
@@ -668,6 +683,9 @@ func (w *Writer) upsertLead(ctx context.Context, entry *gmaps.Entry) (*UpsertLea
 }
 
 func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, jobID, jobName string) (*UpsertLeadResult, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if entry == nil {
 		return nil, nil
 	}
@@ -731,6 +749,9 @@ func (w *Writer) upsertLeadWithContext(ctx context.Context, entry *gmaps.Entry, 
 
 // FindCompletedSearch searches for an existing completed search matching query and optional location.
 func (w *Writer) FindCompletedSearch(ctx context.Context, query string, location string) (*SearchContext, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if w.disabled || w.pool == nil {
 		return nil, errors.New("writer disabled or uninitialized")
 	}
@@ -768,6 +789,9 @@ func (w *Writer) FindCompletedSearch(ctx context.Context, query string, location
 
 // FetchLeadsForSearch retrieves the canonical leads linked to a specific search_id.
 func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit int) ([]*ProspectLead, error) {
+	if err := w.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if w.disabled || w.pool == nil {
 		return nil, errors.New("writer disabled or uninitialized")
 	}
@@ -823,6 +847,9 @@ func (w *Writer) FetchLeadsForSearch(ctx context.Context, searchID string, limit
 
 // WriteLeadsToCSVFile exports a slice of ProspectLeads to a standard CSV file matching gmaps.Entry header specs.
 func (w *Writer) WriteLeadsToCSVFile(leads []*ProspectLead, filePath string) error {
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
 	f, err := os.Create(filePath)
 	if err != nil {
 		return err

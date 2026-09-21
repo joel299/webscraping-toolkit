@@ -32,4 +32,7 @@ UI (Scrape Request)
 9. **Non-Destructive UPSERT**: Re-scraping an existing lead updates basic information while strictly preserving existing commercial SDR fields (`lead_status`, `pipeline_stage`, etc.) and existing non-empty enrichment attributes.
 10. **Isolated Parallel Execution**: GRU-84 baseline remains untouched on port `:8080`, while GRU-88 operates in parallel on port `:8086`.
 
+## Shadow Writer Lifecycle (GRU-92)
+
+The web runner creates one `shadow.Writer` during runner construction and reuses it for database-first reads, search registration, result persistence, and status updates across jobs. `NewWriterFromEnv` is not called from individual jobs. The writer owns and closes the environment-created `pgxpool.Pool` during runner shutdown; writers created with `NewWriter(pool, ...)` borrow the caller-owned pool. `Close` is idempotent, and operations after close return `ErrWriterClosed`.
 

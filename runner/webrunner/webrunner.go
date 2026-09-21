@@ -26,10 +26,11 @@ import (
 )
 
 type webrunner struct {
-	srv       *web.Server
-	svc       *web.Service
-	cfg       *runner.Config
-	setupMate func(context.Context, io.Writer, *web.Job) (mateRunner, error)
+	srv          *web.Server
+	svc          *web.Service
+	cfg          *runner.Config
+	setupMate    func(context.Context, io.Writer, *web.Job) (mateRunner, error)
+	shadowWriter *shadow.Writer
 }
 
 type mateRunner interface {
@@ -62,11 +63,17 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 		return nil, err
 	}
 
+	var shadowWriter *shadow.Writer
+	if rawWriter := shadow.NewWriterFromEnv(); rawWriter != nil {
+		shadowWriter, _ = rawWriter.(*shadow.Writer)
+	}
+
 	ans := webrunner{
-		srv:       srv,
-		svc:       svc,
-		cfg:       cfg,
-		setupMate: defaultSetupMate(cfg),
+		srv:          srv,
+		svc:          svc,
+		cfg:          cfg,
+		setupMate:    defaultSetupMate(cfg, shadowWriter),
+		shadowWriter: shadowWriter,
 	}
 
 	return &ans, nil
@@ -87,6 +94,9 @@ func (w *webrunner) Run(ctx context.Context) error {
 }
 
 func (w *webrunner) Close(context.Context) error {
+	if w.shadowWriter != nil {
+		return w.shadowWriter.Close()
+	}
 	return nil
 }
 
@@ -158,66 +168,64 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	// Controlled by PROSPECT_READ_MODE=current|database (default: current)
 	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("PROSPECT_READ_MODE")))
 	if readMode == "database" {
-		if sw := shadow.NewWriterFromEnv(); sw != nil {
-			if shadowWriter, ok := sw.(*shadow.Writer); ok {
-				query := strings.Join(job.Data.Keywords, ", ")
-				var coords string
-				if job.Data.Lat != "" && job.Data.Lon != "" {
-					coords = job.Data.Lat + "," + job.Data.Lon
-				}
+		if shadowWriter := w.shadowWriter; shadowWriter != nil {
+			query := strings.Join(job.Data.Keywords, ", ")
+			var coords string
+			if job.Data.Lat != "" && job.Data.Lon != "" {
+				coords = job.Data.Lat + "," + job.Data.Lon
+			}
 
-				if cachedSearch, err := shadowWriter.FindCompletedSearch(ctx, query, coords); err == nil && cachedSearch != nil {
-					leads, fetchErr := shadowWriter.FetchLeadsForSearch(ctx, cachedSearch.SearchID, job.Data.Depth)
-					// GATE 2 GUARD: Partial results MUST NOT be accepted as a DB HIT!
-					// Available leads must be >= requested depth (or if depth <= 0)
-					if fetchErr == nil && len(leads) > 0 && (job.Data.Depth <= 0 || len(leads) >= job.Data.Depth) {
-						if job.Data.Depth > 0 && len(leads) > job.Data.Depth {
-							leads = leads[:job.Data.Depth]
-						}
-
-						log.Printf("[DB-FIRST READ PATH HIT] Job %s served %d leads from database search %s", job.ID, len(leads), cachedSearch.SearchID)
-
-						if err := shadowWriter.WriteLeadsToCSVFile(leads, outpath); err == nil {
-							provenanceOK := true
-							if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
-								SearchID:       job.ID,
-								JobID:          job.ID,
-								JobName:        job.Name,
-								Query:          query,
-								Location:       coords,
-								Category:       query,
-								RequestedLimit: job.Data.Depth,
-								Status:         "running",
-							}); err != nil {
-								provenanceOK = false
-								log.Printf("provenance register failed; falling back to current scraper: operation=register_search search_id=%s", job.ID)
-							}
-
-							if provenanceOK {
-								for order, lead := range leads {
-									if err := shadowWriter.LinkLeadToSearch(ctx, job.ID, lead.PlaceID, order+1); err != nil {
-										provenanceOK = false
-										log.Printf("provenance link failed; falling back to current scraper: operation=link_lead_to_search search_id=%s", job.ID)
-										break
-									}
-								}
-							}
-
-							if provenanceOK {
-								if err := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); err != nil {
-									provenanceOK = false
-									log.Printf("provenance status update failed; falling back to current scraper: operation=update_search_status search_id=%s", job.ID)
-								}
-							}
-
-							if provenanceOK {
-								job.Status = web.StatusOK
-								return w.svc.Update(ctx, job)
-							}
-						}
-					} else if len(leads) > 0 {
-						log.Printf("[DB-FIRST READ PATH MISS - PARTIAL RESULT] Job %s requested %d leads but DB only has %d; falling back to Playwright scraper", job.ID, job.Data.Depth, len(leads))
+			if cachedSearch, err := shadowWriter.FindCompletedSearch(ctx, query, coords); err == nil && cachedSearch != nil {
+				leads, fetchErr := shadowWriter.FetchLeadsForSearch(ctx, cachedSearch.SearchID, job.Data.Depth)
+				// GATE 2 GUARD: Partial results MUST NOT be accepted as a DB HIT!
+				// Available leads must be >= requested depth (or if depth <= 0)
+				if fetchErr == nil && len(leads) > 0 && (job.Data.Depth <= 0 || len(leads) >= job.Data.Depth) {
+					if job.Data.Depth > 0 && len(leads) > job.Data.Depth {
+						leads = leads[:job.Data.Depth]
 					}
+
+					log.Printf("[DB-FIRST READ PATH HIT] Job %s served %d leads from database search %s", job.ID, len(leads), cachedSearch.SearchID)
+
+					if err := shadowWriter.WriteLeadsToCSVFile(leads, outpath); err == nil {
+						provenanceOK := true
+						if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+							SearchID:       job.ID,
+							JobID:          job.ID,
+							JobName:        job.Name,
+							Query:          query,
+							Location:       coords,
+							Category:       query,
+							RequestedLimit: job.Data.Depth,
+							Status:         "running",
+						}); err != nil {
+							provenanceOK = false
+							log.Printf("provenance register failed; falling back to current scraper: operation=register_search search_id=%s", job.ID)
+						}
+
+						if provenanceOK {
+							for order, lead := range leads {
+								if err := shadowWriter.LinkLeadToSearch(ctx, job.ID, lead.PlaceID, order+1); err != nil {
+									provenanceOK = false
+									log.Printf("provenance link failed; falling back to current scraper: operation=link_lead_to_search search_id=%s", job.ID)
+									break
+								}
+							}
+						}
+
+						if provenanceOK {
+							if err := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); err != nil {
+								provenanceOK = false
+								log.Printf("provenance status update failed; falling back to current scraper: operation=update_search_status search_id=%s", job.ID)
+							}
+						}
+
+						if provenanceOK {
+							job.Status = web.StatusOK
+							return w.svc.Update(ctx, job)
+						}
+					}
+				} else if len(leads) > 0 {
+					log.Printf("[DB-FIRST READ PATH MISS - PARTIAL RESULT] Job %s requested %d leads but DB only has %d; falling back to Playwright scraper", job.ID, job.Data.Depth, len(leads))
 				}
 			}
 		}
@@ -234,7 +242,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 
 	setupMate := w.setupMate
 	if setupMate == nil {
-		setupMate = defaultSetupMate(w.cfg)
+		setupMate = defaultSetupMate(w.cfg, w.shadowWriter)
 	}
 
 	mate, err := setupMate(ctx, outfile, job)
@@ -319,11 +327,9 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 				log.Printf("failed to update job status: %v", err2)
 			}
 
-			if sw := shadow.NewWriterFromEnv(); sw != nil {
-				if shadowWriter, ok := sw.(*shadow.Writer); ok {
-					if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", err.Error()); statusErr != nil {
-						log.Printf("provenance status update failed after scrape error: operation=update_search_status search_id=%s", job.ID)
-					}
+			if shadowWriter := w.shadowWriter; shadowWriter != nil {
+				if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", err.Error()); statusErr != nil {
+					log.Printf("provenance status update failed after scrape error: operation=update_search_status search_id=%s", job.ID)
 				}
 			}
 
@@ -334,18 +340,16 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	}
 
 	job.Status = web.StatusOK
-	if sw := shadow.NewWriterFromEnv(); sw != nil {
-		if shadowWriter, ok := sw.(*shadow.Writer); ok {
-			if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); statusErr != nil {
-				log.Printf("provenance status update failed after successful scrape: operation=update_search_status search_id=%s", job.ID)
-			}
+	if shadowWriter := w.shadowWriter; shadowWriter != nil {
+		if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); statusErr != nil {
+			log.Printf("provenance status update failed after successful scrape: operation=update_search_status search_id=%s", job.ID)
 		}
 	}
 
 	return w.svc.Update(ctx, job)
 }
 
-func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
+func defaultSetupMate(cfg *runner.Config, shadowWriter *shadow.Writer) func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
 	return func(ctx context.Context, writer io.Writer, job *web.Job) (mateRunner, error) {
 		opts := []func(*scrapemateapp.Config) error{
 			scrapemateapp.WithConcurrency(cfg.Concurrency),
@@ -388,14 +392,13 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 		csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(writer))
 
 		writers := []scrapemate.ResultWriter{csvWriter}
-		if sw := shadow.NewWriterFromEnv(); sw != nil {
-			if shadowWriter, ok := sw.(*shadow.Writer); ok {
-				shadowWriter.SetJobContext(job.ID, job.Name)
-				var coords string
-				if job.Data.Lat != "" && job.Data.Lon != "" {
-					coords = job.Data.Lat + "," + job.Data.Lon
-				}
-				if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
+		if shadowWriter != nil {
+			shadowWriter.SetJobContext(job.ID, job.Name)
+			var coords string
+			if job.Data.Lat != "" && job.Data.Lon != "" {
+				coords = job.Data.Lat + "," + job.Data.Lon
+			}
+			if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
 					SearchID:       job.ID,
 					JobID:          job.ID,
 					JobName:        job.Name,
@@ -403,11 +406,10 @@ func defaultSetupMate(cfg *runner.Config) func(context.Context, io.Writer, *web.
 					Location:       coords,
 					Category:       strings.Join(job.Data.Keywords, ", "),
 					RequestedLimit: job.Data.Depth,
-				}); err != nil {
-					log.Printf("provenance register failed; scraper will continue: operation=register_search search_id=%s", job.ID)
-				}
-				writers = append(writers, shadowWriter)
+			}); err != nil {
+				log.Printf("provenance register failed; scraper will continue: operation=register_search search_id=%s", job.ID)
 			}
+			writers = append(writers, shadowWriter)
 		}
 
 		matecfg, err := scrapemateapp.NewConfig(
