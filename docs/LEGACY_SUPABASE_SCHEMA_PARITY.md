@@ -16,6 +16,15 @@ This document provides the inventory and status comparison between the legacy so
 - **FOLLOWUP_CANONICAL_ID**: PASS
 - **TRANSACTION_ABORTED**: false
 - **GRU89_MIGRATIONS_TESTED**: PASS
+- **RECONSTRUCTED_BASELINE_STATUS**: VERIFIED (repository migrations define 84 target columns)
+- **TARGET_RUNTIME_COLUMN_COUNT**: 84
+- **HISTORICAL_SOURCE_PARITY**: UNVERIFIABLE
+- **POSTGRES_DELETE_ACL_REVOKED**: PASS
+- **POSTGRES_EFFECTIVE_DELETE**: OWNER_CAPABILITY
+- **SERVICE_ROLE_DELETE_ACL_REVOKED**: PASS for provenance tables
+- **SERVICE_ROLE_EFFECTIVE_DELETE**: DENIED_FOR_PROVENANCE
+- **ANON_ACCESS**: DENIED
+- **AUTHENTICATED_ACCESS**: DENIED
 
 ---
 
@@ -29,9 +38,25 @@ As required by GRU-89 guidelines:
 **Reasoning**: `fsdszcfkjeavuoinyjas` was mistakenly referenced as the legacy prospect database in prior reports. Empirical evidence (Edge Functions, VPS reverse proxy configs, specs, and terminal logs) proves `fsdszcfkjeavuoinyjas` is the Shared Agent Memory database. No external cloud `project_ref` for the legacy prospect database exists in available VPS environment logs or credentials. Per strict audit directives, `SCHEMA_PARITY` cannot be marked `PASS` while `SOURCE_DATABASE_IDENTIFIED` is `FAIL`.
 
 ### 2. Column Divergence Analysis
-- **Initial Target Schema**: 25 columns (14 core extracted lead fields + system metadata) created in `20260920153500_prospect_leads_google_persistence.sql`.
-- **Target Schema After Migration `20260920230000`**: 61 columns (adding all 47 missing legacy fields including qualification stages, followup tracking, lead scoring, ClickUp task IDs, and SDR metadata).
-- **Explanation of Divergence**: Previous audit reports mentioned "37 columns" or "14 columns" depending on whether partial legacy fields or core extracted fields were counted. A real `information_schema.columns` snapshot of `wuyvgmzbmuwcjjzmgccs` confirms `public.prospect_leads_google` currently has 61 columns after applying `20260920230000_prospect_leads_google_legacy_columns.sql`.
+- **Documented previous baseline**: 61 columns. This was the state recorded by the earlier manifest and is not evidence of the historical source schema.
+- **Reconstructed repository baseline**: 84 columns. The base migration defines the original operational fields and `20260920230000_prospect_leads_google_legacy_columns.sql` defines the additional versioned fields.
+- **Target runtime**: a direct `information_schema.columns` query on `wuyvgmzbmuwcjjzmgccs` returned 84 columns.
+- **Interpretation**: the 23 columns after the previously documented 61-column snapshot are present in the versioned target migrations, but their historical origin is not proven. They must not be described as recovered from the legacy source.
+- **Source status**: `SOURCE_DATABASE_PROJECT=UNKNOWN`, `SOURCE_DATABASE_IDENTIFIED=FAIL`, `HISTORICAL_SOURCE_PARITY=UNVERIFIABLE`, `SCHEMA_PARITY=BLOCKED_SOURCE_NOT_IDENTIFIED`.
+
+#### Runtime column inventory
+
+`TARGET_PROSPECT_LEADS_COLUMN_COUNT=84`
+
+`TARGET_PROSPECT_LEADS_COLUMNS=[place_id, cid, place_name, category, categories, address, street, city, state, postal_code, country, phone, whatsapp, website, emails, email, review_rating, review_count, latitude, longitude, google_maps_link, job_id, job_name, created_at, updated_at, lead_status, pipeline_stage, followup_count, followup_at, followup_notes, converted, do_not_contact, processing_status, sdr_owner, commercial_history, appointments, responses, id, total_score, reviews_count, owner_name, administrator_name, legal_name, cnpj, instagram, facebook, linkedin, source, source_category, source_city, source_state, google_maps_url, qualification_status, qualification_stage, lead_score, needs_enrichment, enrichment_complete, contact_ready, responded, followup_enabled, followup_stage, max_followups, next_followup_at, last_followup_at, last_contact_at, last_response_at, last_message, last_message_direction, last_message_id, last_response, clickup_task_id, external_id, processing_locked_at, processing_attempts, processing_error, status, followup_current, followup_completed, followup_completed_at, observed_category, v2_last_job_id, v2_worker_label, persistence_verified, persistence_verified_at]`
+
+`COLUMNS_FROM_CURRENT_BASELINE=[all 84 runtime columns above; the repository migrations reconstruct this target baseline]`
+
+`COLUMNS_PRESENT_OUTSIDE_PREVIOUSLY_DOCUMENTED_61_COLUMN_BASELINE=[max_followups, next_followup_at, last_followup_at, last_contact_at, last_response_at, last_message, last_message_direction, last_message_id, last_response, clickup_task_id, external_id, processing_locked_at, processing_attempts, processing_error, status, followup_current, followup_completed, followup_completed_at, observed_category, v2_last_job_id, v2_worker_label, persistence_verified, persistence_verified_at]`
+
+`COLUMNS_PRESENT_OUTSIDE_RECONSTRUCTED_BASELINE=[]`
+
+The 23-column list identifies the difference from the stale 61-column manifest only. It does not identify a historical source or justify historical parity.
 
 ---
 
@@ -39,7 +64,7 @@ As required by GRU-89 guidelines:
 
 | Object | Type | Source Definition | Target Before | Difference | Required Action | Target After | Verified |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `public.prospect_leads_google` | Table | 61 columns, 10 indexes, RLS enabled | 14 core columns, missing 47 legacy columns & 9 indexes | 47 missing columns, 9 missing indexes | `ALTERED_NON_DESTRUCTIVE` (Migration 20260920230000) | 61 columns, 11 indexes, RLS enabled | PASS |
+| `public.prospect_leads_google` | Table | Historical source unknown; target baseline is versioned in repository | Runtime target observed with 84 columns | Historical comparison blocked; no destructive change permitted | `ALTERED_NON_DESTRUCTIVE` (Migration 20260920230000) | 84 columns, RLS enabled | PASS runtime / BLOCKED historical parity |
 | `public.prospect_followup_google` | Table | 27 columns, 6 indexes, RLS enabled | Missing | Table missing | `CREATED` (Migration 20260920231000) | 27 columns, 6 indexes, RLS enabled | PASS |
 | `public.ia_chat_histories_prospect_google` | Table | 3 columns (id, session_id, message), 1 index, seq | Missing | Table missing | `CREATED` (Migration 20260920232000) | 3 columns, 2 indexes, RLS enabled | PASS |
 | `public.sdr_agent_sessions` | Table | Not present in legacy source DB | Missing | None | `NOT_REQUIRED_WITH_REASON` (Table does not exist in source schema) | N/A | PASS |
@@ -74,9 +99,12 @@ As required by GRU-89 guidelines:
 ---
 
 ## Privilege Audit (Least Privilege Hardening)
-- `postgres`: SELECT, INSERT, UPDATE, REFERENCES, TRIGGER. (TRUNCATE revoked across all migrations).
-- `service_role`: SELECT, INSERT, UPDATE, REFERENCES. (TRUNCATE and DELETE revoked; least privilege enforced).
-- `anon`, `authenticated`, `public`: REVOKE ALL ON ALL PROSPECT TABLES.
+- `POSTGRES_DELETE_ACL_REVOKED=PASS` for `prospect_searches` and `prospect_search_leads` by `20260920202000_prospect_searches_revoke_delete.sql`.
+- `POSTGRES_EFFECTIVE_DELETE=OWNER_CAPABILITY`: `postgres` owns the tables and has `rolbypassrls`; revoking an explicit ACL does not remove owner capability. Therefore documenting `DELETE_ACCESS_POSTGRES=DENIED` would be false.
+- `SERVICE_ROLE_DELETE_ACL_REVOKED=PASS` for `prospect_searches` and `prospect_search_leads`.
+- `SERVICE_ROLE_EFFECTIVE_DELETE=DENIED_FOR_PROVENANCE` after the hardening migration. Legacy tables retain their pre-existing service-role DELETE ACL and are reported separately, not silently generalized.
+- `ANON_ACCESS=DENIED` and `AUTHENTICATED_ACCESS=DENIED` on the audited prospect tables.
+- ACL grant/revoke state and effective owner capability are intentionally reported as separate properties.
 
 ---
 
@@ -100,5 +128,15 @@ As required by GRU-89 guidelines:
 - `RYZE_REQUESTS_FROM_CRON`: `0`
 - `FOLLOWUP_AUTOMATIC_DISPATCH`: `0`
 - `WEBHOOK_AUTOMATIC_CALLS`: `0`
+- `TARGET_PROSPECT_LEADS_COLUMN_COUNT`: `84`
+- `RECONSTRUCTED_BASELINE_STATUS`: `VERIFIED`
+- `TARGET_RUNTIME_COLUMN_COUNT`: `84`
+- `POSTGRES_DELETE_ACL_REVOKED`: `PASS`
+- `POSTGRES_EFFECTIVE_DELETE`: `OWNER_CAPABILITY`
+- `SERVICE_ROLE_DELETE_ACL_REVOKED`: `PASS`
+- `SERVICE_ROLE_EFFECTIVE_DELETE`: `DENIED_FOR_PROVENANCE`
+- `ANON_ACCESS`: `DENIED`
+- `AUTHENTICATED_ACCESS`: `DENIED`
 - `SOURCE_DATABASE_IDENTIFIED`: `FAIL`
+- `HISTORICAL_SOURCE_PARITY`: `UNVERIFIABLE`
 - `SCHEMA_PARITY`: `BLOCKED_SOURCE_NOT_IDENTIFIED`
