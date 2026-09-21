@@ -1,7 +1,7 @@
 # Legacy Supabase Schema Parity Manifest (GRU-89)
 
 ## Executive Summary
-This document provides the inventory and status comparison between the legacy source database and the new operational target database (`wuyvgmzbmuwcjjzmgccs`) for the Google Maps Lead Prospecting domain.
+This document records the reconstructed target baseline and direct runtime validation for the Google Maps Lead Prospecting domain. The historical source database is not identified, so historical parity remains unverified.
 
 - **SOURCE_DATABASE_PROJECT**: UNKNOWN (Evidence for `fsdszcfkjeavuoinyjas` refuted; `fsdszcfkjeavuoinyjas` is Shared Agent Memory)
 - **TARGET_DATABASE_PROJECT**: `wuyvgmzbmuwcjjzmgccs`
@@ -60,28 +60,30 @@ The 23-column list identifies the difference from the stale 61-column manifest o
 
 ---
 
-## Legacy Domain Inventory & Parity Matrix
+## Reconstructed Target Inventory & Historical Parity Status
 
-| Object | Type | Source Definition | Target Before | Difference | Required Action | Target After | Verified |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `public.prospect_leads_google` | Table | Historical source unknown; target baseline is versioned in repository | Runtime target observed with 84 columns | Historical comparison blocked; no destructive change permitted | `ALTERED_NON_DESTRUCTIVE` (Migration 20260920230000) | 84 columns, RLS enabled | PASS runtime / BLOCKED historical parity |
-| `public.prospect_followup_google` | Table | 27 columns, 6 indexes, RLS enabled | Missing | Table missing | `CREATED` (Migration 20260920231000) | 27 columns, 6 indexes, RLS enabled | PASS |
-| `public.ia_chat_histories_prospect_google` | Table | 3 columns (id, session_id, message), 1 index, seq | Missing | Table missing | `CREATED` (Migration 20260920232000) | 3 columns, 2 indexes, RLS enabled | PASS |
-| `public.sdr_agent_sessions` | Table | Not present in legacy source DB | Missing | None | `NOT_REQUIRED_WITH_REASON` (Table does not exist in source schema) | N/A | PASS |
-| `public.prospect_searches` | Table | N/A (New provenance table) | 5 columns | Added in GRU-88 | Preserved intact | 5 columns, RLS enabled | PASS |
-| `public.prospect_search_leads` | Table | N/A (New provenance table) | 5 columns | Added in GRU-88 | Preserved intact | 5 columns, RLS enabled | PASS |
-| `normalize_prospect_whatsapp(text)` | Function | IMMUTABLE PL/pgSQL whatsapp normalizer | Missing | Function missing | `CREATED` (Migration 20260920233000) | IMMUTABLE PL/pgSQL function | PASS |
-| `create_google_lead_followup()` | Function | SECURITY DEFINER PL/pgSQL trigger function | Missing | Function missing | `UPDATED` (Migration 20260920233000) | SECURITY DEFINER function (supports `COALESCE(id, place_id)`) | PASS |
-| `advance_google_lead_followup(text)` | Function | SECURITY DEFINER PL/pgSQL step advancer | Missing | Function missing | `CREATED` (Migration 20260920233000) | SECURITY DEFINER function | PASS |
-| `stop_google_lead_followup(text, text)` | Function | SECURITY DEFINER PL/pgSQL step stopper | Missing | Function missing | `CREATED` (Migration 20260920233000) | SECURITY DEFINER function | PASS |
-| `dispatch_prospect_lead()` | Function | SECURITY DEFINER PL/pgSQL dispatcher w/ pg_net | Missing | Function missing | `CREATED` (Migration 20260920233000) | SECURITY DEFINER function | PASS |
-| `processar_proximo_lead_prospeccao()` | Function | SECURITY DEFINER PL/pgSQL queue worker w/ pg_net | Missing | Function missing | `CREATED` (Migration 20260920233000) | SECURITY DEFINER function | PASS |
-| `trigger_create_google_lead_followup` | Trigger | AFTER INSERT ON `prospect_leads_google` | Missing | Trigger missing | `CREATED` (Migration 20260920233000) | AFTER INSERT trigger active | PASS |
-| `pg_cron` | Extension | Background job scheduling extension | Missing | Extension missing | `CREATED` (Migration 20260920234000) | Installed & active | PASS |
-| `pg_net` | Extension | Asynchronous HTTP client extension | Missing | Extension missing | `CREATED` (Migration 20260920234000) | Installed & active | PASS |
-| `prospect-leads-google-dispatcher` | Cron Job | `* * * * *` -> `dispatch_prospect_lead()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000 & 20260920235000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
-| `followup-dispatcher-every-minute` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000 & 20260920235000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
-| `prospeccao-novos-leads` | Cron Job | `* * * * *` -> `processar_proximo_lead_prospeccao()` | Missing | Cron job missing | `UNSCHEDULED_DISABLED` (Migration 20260920234000 & 20260920235000) | Documented, Unscheduled (`CRON_JOBS_ACTIVE=0`) | PASS |
+Because the source database is not identified, the matrix never treats the repository migrations or the target runtime as observations of that source. `Historical Evidence` is `UNKNOWN / NOT VERIFIABLE` unless an independent historical artifact is available. `Reconstructed Baseline Definition` describes only what is versioned in this repository. `Target Runtime State` describes the direct target checks already executed.
+
+| Object | Type | Historical Evidence | Reconstructed Baseline Definition | Target Runtime State | Action | Verified |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `public.prospect_leads_google` | Table | UNKNOWN / NOT VERIFIABLE | Base persistence migration plus legacy-column migration; 84 columns defined for the reconstructed target | Present with 84 columns and RLS enabled | `ALTERED_NON_DESTRUCTIVE` (`20260920230000`) | PASS runtime / historical parity blocked |
+| `public.prospect_followup_google` | Table | UNKNOWN / NOT VERIFIABLE | 27-column table definition in `20260920231000` | Present; runtime validation passed | `CREATED` (`20260920231000`) | PASS runtime / historical parity blocked |
+| `public.ia_chat_histories_prospect_google` | Table | UNKNOWN / NOT VERIFIABLE | 3-column table definition in `20260920232000` | Present; runtime validation passed | `CREATED` (`20260920232000`) | PASS runtime / historical parity blocked |
+| `public.sdr_agent_sessions` | Table | NOT VERIFIED | NOT REQUIRED / NOT PRESENT in the reconstructed baseline | NOT PRESENT in target runtime | No action; do not infer historical absence | NOT VERIFIED |
+| `public.prospect_searches` | Table | NOT APPLICABLE: new provenance architecture | 5-column provenance table from GRU-88 migrations | Present with RLS enabled | Preserved | PASS target |
+| `public.prospect_search_leads` | Table | NOT APPLICABLE: new provenance architecture | 5-column provenance table from GRU-88 migrations | Present with RLS enabled | Preserved | PASS target |
+| `normalize_prospect_whatsapp(text)` | Function | UNKNOWN / NOT VERIFIABLE | IMMUTABLE PL/pgSQL definition in `20260920233000` | Present in target | `CREATED` | PASS runtime / historical parity blocked |
+| `create_google_lead_followup()` | Function | UNKNOWN / NOT VERIFIABLE | SECURITY DEFINER trigger function using canonical `id/place_id` in `20260920233000` | Present; exercised by controlled trigger test | `UPDATED` | PASS runtime / historical parity blocked |
+| `advance_google_lead_followup(text)` | Function | UNKNOWN / NOT VERIFIABLE | SECURITY DEFINER step-advance definition in `20260920233000` | Present in target | `CREATED` | PASS runtime / historical parity blocked |
+| `stop_google_lead_followup(text, text)` | Function | UNKNOWN / NOT VERIFIABLE | SECURITY DEFINER stop definition in `20260920233000` | Present in target | `CREATED` | PASS runtime / historical parity blocked |
+| `dispatch_prospect_lead()` | Function | UNKNOWN / NOT VERIFIABLE | SECURITY DEFINER dispatcher definition in `20260920233000` | Present; external dispatch not invoked | `CREATED` | PASS runtime / historical parity blocked |
+| `processar_proximo_lead_prospeccao()` | Function | UNKNOWN / NOT VERIFIABLE | SECURITY DEFINER queue-worker definition in `20260920233000` | Present; external dispatch not invoked | `CREATED` | PASS runtime / historical parity blocked |
+| `trigger_create_google_lead_followup` | Trigger | UNKNOWN / NOT VERIFIABLE | AFTER INSERT trigger definition in `20260920233000` | Present and passed controlled test | `CREATED` | PASS runtime / historical parity blocked |
+| `pg_cron` | Extension | UNKNOWN / NOT VERIFIABLE | Extension declaration in target migrations | Present in target; no operational jobs active | `CREATED` | PASS runtime / historical parity blocked |
+| `pg_net` | Extension | UNKNOWN / NOT VERIFIABLE | Extension declaration in target migrations | Present in target; no external request invoked | `CREATED` | PASS runtime / historical parity blocked |
+| `prospect-leads-google-dispatcher` | Cron Job | UNKNOWN / NOT VERIFIABLE | Future job definition documented by migrations; activation prohibited | Absent/inactive in `cron.job` | `UNSCHEDULED_DISABLED` (`20260920235000`) | PASS target / historical parity blocked |
+| `followup-dispatcher-every-minute` | Cron Job | UNKNOWN / NOT VERIFIABLE | Future job definition documented by migrations; activation prohibited | Absent/inactive in `cron.job` | `UNSCHEDULED_DISABLED` (`20260920235000`) | PASS target / historical parity blocked |
+| `prospeccao-novos-leads` | Cron Job | UNKNOWN / NOT VERIFIABLE | Future job definition documented by migrations; activation prohibited | Absent/inactive in `cron.job` | `UNSCHEDULED_DISABLED` (`20260920235000`) | PASS target / historical parity blocked |
 
 ---
 
@@ -109,8 +111,9 @@ The 23-column list identifies the difference from the stale 61-column manifest o
 ---
 
 ## Summary Verification
-- `SOURCE_TABLE_COUNT`: 3 legacy domain tables (`prospect_leads_google`, `prospect_followup_google`, `ia_chat_histories_prospect_google`)
-- `TARGET_TABLE_COUNT`: 5 domain tables (3 legacy + 2 provenance additions: `prospect_searches`, `prospect_search_leads`)
+- `HISTORICAL_SOURCE_TABLE_COUNT`: `UNKNOWN`
+- `RECONSTRUCTED_BASELINE_TABLE_COUNT`: 3 operational tables defined by repository migrations (`prospect_leads_google`, `prospect_followup_google`, `ia_chat_histories_prospect_google`)
+- `TARGET_RUNTIME_TABLE_COUNT`: 5 domain tables (3 reconstructed operational tables + 2 provenance additions: `prospect_searches`, `prospect_search_leads`)
 - `MISSING_TABLES`: `[]`
 - `MISSING_FUNCTIONS`: `[]`
 - `MISSING_TRIGGERS`: `[]`
