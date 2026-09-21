@@ -78,16 +78,16 @@ type Metrics struct {
 }
 
 type Writer struct {
-	pool         *pgxpool.Pool
-	saveInterval time.Duration
-	batchSize    int
-	metrics      Metrics
-	mu           sync.Mutex
-	disabled     bool
-	mapper       *ProspectLeadMapper
-	validator    *ProspectLeadValidator
-	jobID        string
-	jobName      string
+	pool               *pgxpool.Pool
+	saveInterval       time.Duration
+	batchSize          int
+	metrics            Metrics
+	mu                 sync.Mutex
+	disabled           bool
+	mapper             *ProspectLeadMapper
+	validator          *ProspectLeadValidator
+	jobID              string
+	jobName            string
 	provenanceDegraded uint32
 }
 
