@@ -41,6 +41,12 @@ func (s *Service) Create(ctx context.Context, job *Job) error {
 }
 
 func (s *Service) All(ctx context.Context) ([]Job, error) {
+	if databaseReadMode() {
+		if s.database == nil {
+			return nil, fmt.Errorf("database read mode is unavailable")
+		}
+		return s.database.ListAllJobs(ctx)
+	}
 	return s.repo.Select(ctx, SelectParams{})
 }
 

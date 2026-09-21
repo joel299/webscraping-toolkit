@@ -20,6 +20,25 @@ type databaseReader struct {
 
 var errDatabaseRead = errors.New("database read failed")
 
+func (r databaseReader) ListAllJobs(ctx context.Context) ([]web.Job, error) {
+	_, total, err := r.writer.ListSearches(ctx, 0, 1)
+	if err != nil {
+		return nil, errDatabaseRead
+	}
+	if total == 0 {
+		return []web.Job{}, nil
+	}
+	searches, _, err := r.writer.ListSearches(ctx, 0, total)
+	if err != nil {
+		return nil, errDatabaseRead
+	}
+	jobs := make([]web.Job, 0, len(searches))
+	for _, search := range searches {
+		jobs = append(jobs, searchToJob(search))
+	}
+	return jobs, nil
+}
+
 func (r databaseReader) ListJobs(ctx context.Context, page, limit int) (web.JobPage, error) {
 	if page < 1 {
 		page = 1

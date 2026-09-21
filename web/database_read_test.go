@@ -2,6 +2,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +14,10 @@ type fakeDatabaseReader struct {
 	page  JobPage
 	job   Job
 	place []Place
+}
+
+func (f fakeDatabaseReader) ListAllJobs(context.Context) ([]Job, error) {
+	return f.page.Jobs, nil
 }
 
 func (f fakeDatabaseReader) ListJobs(context.Context, int, int) (JobPage, error) {
@@ -69,5 +76,59 @@ func TestDatabaseReadModeDoesNotSilentlyFallBack(t *testing.T) {
 	}
 	if _, err := svc.GetPlaces(context.Background(), "search-1"); err == nil {
 		t.Fatal("expected unavailable database read mode error for places")
+	}
+}
+
+func TestAPIGetJobsUsesDatabaseReaderInDatabaseMode(t *testing.T) {
+	t.Setenv("PROSPECT_READ_MODE", "database")
+	databaseJobs := []Job{{ID: "search-db-1"}, {ID: "search-db-2"}}
+	repo := &mockJobRepo{jobs: []Job{{ID: "sqlite-only"}}}
+	svc := NewService(repo, t.TempDir())
+	svc.SetDatabaseReader(fakeDatabaseReader{page: JobPage{Jobs: databaseJobs}})
+	srv, err := New(svc, ":0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var jobs []Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != "search-db-1" || jobs[1].ID != "search-db-2" {
+		t.Fatalf("database jobs = %+v", jobs)
+	}
+}
+
+func TestAPIGetJobsUsesSQLiteInCurrentMode(t *testing.T) {
+	t.Setenv("PROSPECT_READ_MODE", "current")
+	repoJobs := []Job{{ID: "sqlite-job"}}
+	repo := &mockJobRepo{jobs: repoJobs}
+	svc := NewService(repo, t.TempDir())
+	svc.SetDatabaseReader(fakeDatabaseReader{page: JobPage{Jobs: []Job{{ID: "database-only"}}}})
+	srv, err := New(svc, ":0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var jobs []Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "sqlite-job" {
+		t.Fatalf("current-mode jobs = %+v", jobs)
 	}
 }
