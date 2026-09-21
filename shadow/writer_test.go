@@ -85,11 +85,10 @@ func TestProvenanceErrorClass(t *testing.T) {
 	})
 
 	t.Run("postgres error is classified without message", func(t *testing.T) {
-		err := &pgconn.PgError{Code: "23503", Message: "SQLERRM=secret@example.com password=hidden"}
+		err := &pgconn.PgError{Code: "23503", Message: "sensitive database detail"}
 		classified := ProvenanceErrorClass(err)
 		assert.Equal(t, "postgres_23503", classified)
-		assert.NotContains(t, classified, "SQLERRM")
-		assert.NotContains(t, classified, "secret@example.com")
+		assert.NotContains(t, classified, "sensitive database detail")
 	})
 }
 

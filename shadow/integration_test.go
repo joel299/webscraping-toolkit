@@ -44,7 +44,7 @@ func newProvenanceFailureTestWriter(t *testing.T) (context.Context, *pgxpool.Poo
 
 	testDSN := strings.TrimSpace(os.Getenv("PROSPECT_DATABASE_URL"))
 	if testDSN == "" {
-		testDSN = "postgres://postgres:shadowpass@127.0.0.1:5439/prospects_db?sslmode=disable"
+		t.Skip("Skipping integration test: PROSPECT_DATABASE_URL is not configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
