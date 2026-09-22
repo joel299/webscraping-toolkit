@@ -19,6 +19,7 @@ func TestDatabaseReaderListSearchesAndAPIIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping PostgreSQL integration test in short mode")
 	}
+	t.Setenv("PROSPECT_READ_MODE", "database")
 	dsn := os.Getenv("PROSPECT_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("PROSPECT_DATABASE_URL is not configured")
