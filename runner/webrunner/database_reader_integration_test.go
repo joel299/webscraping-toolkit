@@ -66,11 +66,11 @@ func TestDatabaseReaderListSearchesAndAPIIntegration(t *testing.T) {
 			(search_id, job_id, job_name, query, location, category, requested_limit, status, created_at, completed_at)
 		VALUES
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL),
-			($10, $11, $12, $13, $14, $15, $16, $17, $18, $19),
-			($20, $21, $22, $23, $24, $25, $26, $27, $28, NULL),
+			($10, $11, $12, $13, $14, $15, $16, $17, $18, NULL),
+			($19, $20, $21, $22, $23, $24, $25, $26, $27, $28),
 			($29, $30, $31, $32, $33, $34, $35, $36, $37, $38)`,
 		"search-created", "job-created", "Created", "q1", "loc", "cat", 10, "created", base,
-		"search-running", "job-running", "Running", "q2", "loc", "cat", 20, "running", base.Add(time.Minute), base.Add(time.Minute+time.Second),
+		"search-running", "job-running", "Running", "q2", "loc", "cat", 20, "running", base.Add(time.Minute),
 		"search-completed", "job-completed", "Completed", "q3", "loc", "cat", 30, "completed", base.Add(2*time.Minute), base.Add(2*time.Minute+time.Second),
 		"search-failed", "job-failed", "Failed", "q4", "loc", "cat", 40, "failed", base.Add(3*time.Minute), base.Add(3*time.Minute+time.Second),
 	)
