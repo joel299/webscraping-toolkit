@@ -34,6 +34,11 @@ type Server struct {
 	svc  *Service
 }
 
+// Handler returns the configured HTTP handler for embedding and integration tests.
+func (s *Server) Handler() http.Handler {
+	return s.srv.Handler
+}
+
 func New(svc *Service, addr string) (*Server, error) {
 	ans := Server{
 		svc:  svc,

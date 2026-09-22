@@ -142,6 +142,11 @@ func NewWriterFromEnv() scrapemate.ResultWriter {
 	config.MaxConns = 10
 	config.MinConns = 2
 	config.MaxConnIdleTime = 5 * time.Minute
+	// Supabase transaction poolers can reuse a backend connection for a
+	// different client while a named prepared statement is still registered.
+	// Simple protocol keeps the read/write path compatible with that pooler
+	// mode and avoids postgres_42P05 on otherwise valid idempotent queries.
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -246,6 +251,34 @@ func ProvenanceErrorClass(err error) string {
 		return "postgres_" + pgErr.Code
 	}
 	return "database_error"
+}
+
+const databaseReadAttempts = 2
+
+func retryableDatabaseReadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return strings.HasPrefix(pgErr.Code, "08") ||
+			strings.HasPrefix(pgErr.Code, "53") ||
+			strings.HasPrefix(pgErr.Code, "57")
+	}
+
+	return true
+}
+
+func waitForDatabaseReadRetry(ctx context.Context) error {
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (w *Writer) markProvenanceFailure(operation string, err error) {
@@ -808,19 +841,40 @@ func (w *Writer) ListSearches(ctx context.Context, offset, limit int) ([]SearchC
 	}
 
 	var total int
-	if err := w.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.prospect_searches`).Scan(&total); err != nil {
-		return nil, 0, err
+	for attempt := 1; attempt <= databaseReadAttempts; attempt++ {
+		err := w.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.prospect_searches`).Scan(&total)
+		if err == nil {
+			break
+		}
+		log.Warn("database read failed", "operation", "list_searches_count", "error_class", ProvenanceErrorClass(err), "attempt", attempt, "read_model", "database")
+		if attempt == databaseReadAttempts || !retryableDatabaseReadError(err) {
+			return nil, 0, err
+		}
+		if err := waitForDatabaseReadRetry(ctx); err != nil {
+			return nil, 0, err
+		}
 	}
 
-	rows, err := w.pool.Query(ctx, `
-		SELECT search_id, job_id, COALESCE(job_name, ''), COALESCE(query, ''),
-		       COALESCE(location, ''), COALESCE(category, ''), COALESCE(requested_limit, 0),
-		       COALESCE(status, 'failed'), created_at, completed_at
-		FROM public.prospect_searches
-		ORDER BY created_at DESC, search_id DESC
-		LIMIT $1 OFFSET $2`, limit, offset)
-	if err != nil {
-		return nil, 0, err
+	var rows pgx.Rows
+	var err error
+	for attempt := 1; attempt <= databaseReadAttempts; attempt++ {
+		rows, err = w.pool.Query(ctx, `
+			SELECT search_id, job_id, COALESCE(job_name, ''), COALESCE(query, ''),
+			       COALESCE(location, ''), COALESCE(category, ''), COALESCE(requested_limit, 0),
+			       COALESCE(status, 'failed'), created_at, completed_at
+			FROM public.prospect_searches
+			ORDER BY created_at DESC, search_id DESC
+			LIMIT $1 OFFSET $2`, limit, offset)
+		if err == nil {
+			break
+		}
+		log.Warn("database read failed", "operation", "list_searches_select", "error_class", ProvenanceErrorClass(err), "attempt", attempt, "read_model", "database")
+		if attempt == databaseReadAttempts || !retryableDatabaseReadError(err) {
+			return nil, 0, err
+		}
+		if err := waitForDatabaseReadRetry(ctx); err != nil {
+			return nil, 0, err
+		}
 	}
 	defer rows.Close()
 
@@ -832,11 +886,13 @@ func (w *Writer) ListSearches(ctx context.Context, offset, limit int) ([]SearchC
 			&search.Location, &search.Category, &search.RequestedLimit,
 			&search.Status, &search.CreatedAt, &search.CompletedAt,
 		); err != nil {
+			log.Warn("database read failed", "operation", "list_searches_scan", "error_class", ProvenanceErrorClass(err), "attempt", 1, "read_model", "database")
 			return nil, 0, err
 		}
 		searches = append(searches, search)
 	}
 	if err := rows.Err(); err != nil {
+		log.Warn("database read failed", "operation", "list_searches_rows", "error_class", ProvenanceErrorClass(err), "attempt", 1, "read_model", "database")
 		return nil, 0, err
 	}
 

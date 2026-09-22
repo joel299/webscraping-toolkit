@@ -92,6 +92,14 @@ func TestProvenanceErrorClass(t *testing.T) {
 	})
 }
 
+func TestRetryableDatabaseReadError(t *testing.T) {
+	assert.True(t, retryableDatabaseReadError(&pgconn.PgError{Code: "08006"}))
+	assert.True(t, retryableDatabaseReadError(&pgconn.PgError{Code: "57P01"}))
+	assert.False(t, retryableDatabaseReadError(&pgconn.PgError{Code: "42703"}))
+	assert.False(t, retryableDatabaseReadError(context.Canceled))
+	assert.False(t, retryableDatabaseReadError(context.DeadlineExceeded))
+}
+
 func TestLoadDSN(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretFile := filepath.Join(tmpDir, "prospect_database_url")

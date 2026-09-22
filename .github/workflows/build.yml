@@ -72,6 +72,11 @@ jobs:
           PROSPECT_DATABASE_URL: "postgres://postgres:shadowpass@127.0.0.1:5432/prospects_db?sslmode=disable"
         run: go test -v ./shadow/...
 
+      - name: Integration Tests (Database Jobs Read Path)
+        env:
+          PROSPECT_DATABASE_URL: "postgres://postgres:shadowpass@127.0.0.1:5432/prospects_db?sslmode=disable"
+        run: go test -v ./runner/webrunner -run TestDatabaseReaderListSearchesAndAPIIntegration -count=1
+
       - name: Integration Tests (Redis Service Container)
         env:
           PROSPECT_REDIS_INTEGRATION: "1"
