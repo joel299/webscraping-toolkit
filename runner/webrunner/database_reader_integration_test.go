@@ -79,7 +79,7 @@ func TestDatabaseReaderListSearchesAndAPIIntegration(t *testing.T) {
 	jobs, err = reader.ListAllJobs(ctx)
 	require.NoError(t, err)
 	require.Len(t, jobs, 4)
-	require.Equal(t, "job-failed", jobs[0].ID)
+	require.Equal(t, "search-failed", jobs[0].ID)
 	require.Equal(t, web.StatusFailed, jobs[0].Status)
 	require.Equal(t, web.StatusOK, jobs[1].Status)
 	require.Equal(t, web.StatusWorking, jobs[2].Status)
@@ -90,7 +90,7 @@ func TestDatabaseReaderListSearchesAndAPIIntegration(t *testing.T) {
 	require.Equal(t, 2, page.TotalPages)
 	require.Equal(t, 4, page.Total)
 	require.Len(t, page.Jobs, 2)
-	require.Equal(t, "job-running", page.Jobs[0].ID)
+	require.Equal(t, "search-running", page.Jobs[0].ID)
 
 	svc := web.NewService(nil, t.TempDir())
 	svc.SetDatabaseReader(reader)
