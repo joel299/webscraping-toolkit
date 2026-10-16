@@ -46,6 +46,7 @@ paths:
     post:
       security: []
       summary: Sign in and create a 30-day access token
+      description: Autentica a conta existente usando e-mail e senha e retorna um bearer token válido por 30 dias. Use esse token no cabeçalho Authorization para acessar os endpoints protegidos.
       operationId: loginApiAccount
       requestBody:
         required: true
@@ -107,6 +108,7 @@ paths:
   /api/v1/jobs:
     post:
       summary: Create a new job scraping task
+      description: Cria uma tarefa de pesquisa no Google Maps com as palavras-chave e os parâmetros enviados. A tarefa é enfileirada para processamento; a resposta retorna o identificador para acompanhar o status e consultar os resultados depois.
       x-code-samples:
         - lang: curl
           source: |
@@ -148,6 +150,7 @@ paths:
 
     get:
       summary: Get all jobs
+      description: Retorna as tarefas de pesquisa registradas, incluindo identificador, nome, data, status e parâmetros de cada tarefa.
       x-code-samples:
         - lang: curl
           source: |
@@ -205,6 +208,7 @@ paths:
   /api/v1/jobs/{id}:
     get:
       summary: Get a specific job
+      description: Consulta uma tarefa pelo identificador e retorna seus dados, parâmetros e status atual. Use o identificador recebido ao criar a tarefa.
       x-code-samples:
         - lang: curl
           source: |
@@ -237,6 +241,7 @@ paths:
 
     delete:
       summary: Delete a specific job
+      description: Exclui a tarefa identificada e seus dados associados do armazenamento configurado. A operação exige um token com o escopo `delete`.
       x-code-samples:
         - lang: curl
           source: |
@@ -266,6 +271,7 @@ paths:
   /api/v1/jobs/{id}/download:
     get:
       summary: Download job results as CSV
+      description: Baixa em formato CSV os resultados gerados por uma tarefa concluída. O arquivo só fica disponível depois que o processamento produzir os resultados.
       x-code-samples:
           source: |
             curl -X GET "http://localhost:8080/api/v1/jobs/18eafda3-53a9-4970-ac96-8f8dfc7011c3/download" --output results.csv
