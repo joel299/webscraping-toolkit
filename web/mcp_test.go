@@ -20,6 +20,17 @@ type tokenRoundTripper struct {
 	token string
 }
 
+type tailscaleHostRoundTripper struct{ token string }
+
+func (r tailscaleHostRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	cloned.Header.Set("Authorization", "Bearer "+r.token)
+	cloned.Header.Set("Tailscale-User-Login", "stark@example.test")
+	cloned.Host = "joel.tailnet.example"
+	return http.DefaultTransport.RoundTrip(cloned)
+}
+
 func (r tokenRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	cloned := request.Clone(request.Context())
 	cloned.Header = request.Header.Clone()
@@ -162,6 +173,28 @@ func TestMCPRequiresBearerJWTAndScopes(t *testing.T) {
 	}
 }
 
+func TestMCPAcceptsTailscaleServeHostWithIdentityHeader(t *testing.T) {
+	secret := []byte(strings.Repeat("m", 32))
+	server := httptest.NewServer(newMCPHandler(NewService(&mockJobRepo{}, t.TempDir()), secret))
+	t.Cleanup(server.Close)
+	token, err := mcpjwt.Generate(secret, "tailnet-agent", []string{"read"}, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "tailnet-test", Version: "1"}, nil)
+	session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
+		Endpoint: server.URL, HTTPClient: &http.Client{Transport: tailscaleHostRoundTripper{token: token}}, DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect through Tailscale Serve host: %v", err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(t.Context(), nil)
+	if err != nil || len(tools.Tools) != 6 {
+		t.Fatalf("list tools through Tailscale Serve host: tools=%d err=%v", len(tools.Tools), err)
+	}
+}
+
 func TestRESTAPIRequiresJWTWhenConfigured(t *testing.T) {
 	t.Setenv("PROSPECT_READ_MODE", "current")
 	secret := strings.Repeat("x", 32)
@@ -204,9 +237,55 @@ func TestOpenAPIDocumentsMCPRoute(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("OpenAPI spec status = %d, want 200", recorder.Code)
 	}
-	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id"} {
+	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id", "/api/v1/tokens:", "token:issue", "CreateTokenResponse"} {
 		if !strings.Contains(recorder.Body.String(), expected) {
 			t.Errorf("OpenAPI spec does not document %q", expected)
 		}
+	}
+}
+
+func TestTokenIssuanceRequiresAdminScopeAndReturnsScopedToken(t *testing.T) {
+	secret := strings.Repeat("z", 32)
+	t.Setenv("MCP_JWT_SECRET_FILE", "")
+	t.Setenv("MCP_JWT_SECRET", secret)
+	t.Setenv("PROSPECT_READ_MODE", "current")
+	srv, err := New(NewService(&mockJobRepo{}, t.TempDir()), ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueToken := func(scopes []string) string {
+		t.Helper()
+		value, generateErr := mcpjwt.Generate([]byte(secret), "issuer", scopes, time.Hour, time.Now())
+		if generateErr != nil {
+			t.Fatal(generateErr)
+		}
+		return value
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"subject":"stark-agent","scopes":["read"],"ttl":"1h"}`))
+	request.Header.Set("Authorization", "Bearer "+issueToken([]string{"read"}))
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("reader token issuance status = %d, want 403", recorder.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"subject":"stark-agent","scopes":["read"],"ttl":"1h"}`))
+	request.Header.Set("Authorization", "Bearer "+issueToken([]string{"token:issue"}))
+	recorder = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("admin token issuance status = %d, want 201: %s", recorder.Code, recorder.Body.String())
+	}
+	var result createTokenResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil || result.AccessToken == "" {
+		t.Fatalf("token endpoint returned invalid response: %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer "+result.AccessToken)
+	recorder = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("read-only issued token write status = %d, want 403", recorder.Code)
 	}
 }

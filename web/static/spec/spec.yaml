@@ -12,6 +12,39 @@ security:
   - BearerAuth: []
 
 paths:
+  /api/v1/tokens:
+    post:
+      summary: Generate a scoped API and MCP access token
+      description: Issues a short-lived bearer JWT. Requires an existing administrator JWT with the `token:issue` scope. The returned token is shown once; store it securely. Allowed scopes are `read`, `write`, `delete`, and `token:issue`.
+      operationId: createAccessToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTokenRequest'
+            example:
+              subject: stark-agent
+              scopes: [read, write]
+              ttl: 24h
+      responses:
+        '201':
+          description: Token created. The access token is returned only in this response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateTokenResponse'
+        '400':
+          description: Invalid JSON or token lifetime format.
+        '401':
+          description: Bearer JWT absent, invalid, or expired.
+        '403':
+          description: The caller JWT does not have the token:issue scope.
+        '422':
+          description: Invalid subject, scope, or lifetime.
+        '503':
+          description: JWT authentication is not configured.
+
   /api/v1/jobs:
     post:
       summary: Create a new job scraping task
@@ -311,6 +344,44 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    CreateTokenRequest:
+      type: object
+      required: [subject, scopes]
+      properties:
+        subject:
+          type: string
+          description: Name identifying the agent that will use the token.
+          example: stark-agent
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [read, write, delete, token:issue]
+        ttl:
+          type: string
+          default: 24h
+          description: Go duration from 1 second up to 720 hours, for example 30m or 24h.
+    CreateTokenResponse:
+      type: object
+      required: [access_token, token_type, subject, scopes, expires_at]
+      properties:
+        access_token:
+          type: string
+          format: password
+          description: Bearer JWT. Treat as a secret.
+        token_type:
+          type: string
+          enum: [Bearer]
+        subject:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
     MCPJSONRPCRequest:
       type: object
       required: [jsonrpc, method]

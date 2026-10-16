@@ -24,7 +24,7 @@ const (
 	minimumBytes = 32
 )
 
-var allowedScopes = map[string]struct{}{"read": {}, "write": {}, "delete": {}}
+var allowedScopes = map[string]struct{}{"read": {}, "write": {}, "delete": {}, "token:issue": {}}
 
 type claims struct {
 	Issuer   string   `json:"iss"`
@@ -62,7 +62,8 @@ func decodeSecret(value string) ([]byte, error) {
 	return []byte(value), nil
 }
 
-// Generate signs a short-lived JWT. Supported scopes are read, write, delete.
+// Generate signs a short-lived JWT. Supported scopes are read, write, delete,
+// and token:issue (administrator permission to mint scoped access tokens).
 func Generate(secret []byte, subject string, scopes []string, ttl time.Duration, now time.Time) (string, error) {
 	if len(secret) < minimumBytes {
 		return "", fmt.Errorf("MCP JWT secret must contain at least %d bytes", minimumBytes)

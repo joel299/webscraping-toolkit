@@ -93,7 +93,19 @@ func newMCPHandler(svc *Service, secret []byte) http.Handler {
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		JSONResponse: true,
 	})
-	return auth.RequireBearerToken(mcpjwt.Verifier(secret), &auth.RequireBearerTokenOptions{})(handler)
+	authenticated := auth.RequireBearerToken(mcpjwt.Verifier(secret), &auth.RequireBearerTokenOptions{})(handler)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Tailscale Serve terminates HTTPS and proxies to the loopback listener,
+		// so the MCP SDK's DNS-rebinding check sees a loopback local address and
+		// the external MagicDNS Host. Serve strips spoofed identity headers and
+		// injects this header itself; rewrite Host only for that trusted proxy.
+		if strings.TrimSpace(r.Header.Get("Tailscale-User-Login")) != "" {
+			proxied := r.Clone(r.Context())
+			proxied.Host = "localhost"
+			r = proxied
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 func registerMCPTools(server *mcp.Server, svc *Service) {

@@ -36,6 +36,7 @@ type Server struct {
 	srv         *http.Server
 	svc         *Service
 	authEnabled bool
+	jwtSecret   []byte
 }
 
 // Handler returns the configured HTTP handler for embedding and integration tests.
@@ -66,6 +67,7 @@ func New(svc *Service, addr string) (*Server, error) {
 		return nil, err
 	}
 	ans.authEnabled = len(jwtSecret) > 0
+	ans.jwtSecret = jwtSecret
 	apiAuth := func(next http.Handler) http.Handler {
 		if len(jwtSecret) == 0 {
 			return next
@@ -98,6 +100,17 @@ func New(svc *Service, addr string) (*Server, error) {
 
 	// api routes
 	mux.HandleFunc("/api/docs", ans.scalarHandler)
+	mux.Handle("/api/v1/tokens", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: methodNotAllowedMessage})
+			return
+		}
+		if !ans.requireAPIScope(w, r, "token:issue") {
+			return
+		}
+		ans.apiCreateToken(w, r)
+	})))
 	mux.Handle("/api/v1/jobs", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:

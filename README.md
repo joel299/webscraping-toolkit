@@ -221,7 +221,15 @@ Reinicie o servidor para ativar a autenticação. Gere um token curto (padrão d
 .\scripts\generate-mcp-token.ps1 -Subject "meu-agente" -Scopes "read,write,delete" -TTL "24h"
 ```
 
-O token aparece no terminal; trate-o como senha e não o envie em conversas ou repositórios. As permissões disponíveis são `read`, `write` e `delete`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
+O token aparece no terminal; trate-o como senha e não o envie em conversas ou repositórios. Para emitir tokens de agente pela API, gere primeiro um token administrativo local com o escopo adicional `token:issue`:
+
+```powershell
+.\scripts\generate-mcp-token.ps1 -Subject "administrador" -Scopes "read,write,delete,token:issue" -TTL "24h"
+```
+
+Cole esse token administrativo em **Authorize** no Scalar e chame `POST /api/v1/tokens` com `{"subject":"stark-agent","scopes":["read","write"],"ttl":"24h"}`. O endpoint exige o escopo `token:issue` e retorna o token do agente uma única vez. Não dê esse escopo ao token normal do agente. As permissões disponíveis são `read`, `write`, `delete` e `token:issue`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
+
+Para disponibilizar o serviço somente na tailnet com HTTPS, com o app local em execução, use `tailscale serve --bg http://127.0.0.1:8086`. O cliente MCP deve conectar a `https://<MagicDNS-do-computador>/mcp` e enviar `Authorization: Bearer <token-do-agente>`. O acesso de rede continua sujeito às políticas de acesso da tailnet; o Funnel não é necessário.
 
 Na página **Integrações / API**, cole o token no campo da sessão. Quando o navegador oferece `document.modelContext`, o frontend registra essas mesmas seis operações como ferramentas WebMCP. Navegadores sem essa API ainda podem conectar um cliente MCP em `/mcp`. WebMCP é a API de ferramentas do navegador; `/mcp` é o endpoint MCP remoto do servidor.
 
