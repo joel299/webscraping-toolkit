@@ -4,19 +4,82 @@
     <title>Documentação da API — Central de Leads</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { color-scheme: dark; }
+      #api-auth-panel {
+        box-sizing: border-box;
+        padding: 12px 18px;
+        border-bottom: 1px solid #303030;
+        background: #111;
+        color: #e5e7eb;
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+      #api-auth-form {
+        display: grid;
+        grid-template-columns: minmax(240px, 1fr) minmax(200px, .8fr) auto;
+        gap: 10px 14px;
+        align-items: center;
+      }
+      .api-auth-field { display: flex; gap: 10px; align-items: center; min-width: 0; }
+      .api-auth-field label { flex: 0 0 auto; color: #d1d5db; }
+      .api-auth-field input {
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 0;
+        padding: 8px 10px;
+        border: 1px solid #4b5563;
+        border-radius: 6px;
+        background: #262626;
+        color: #f9fafb;
+        font: inherit;
+      }
+      .api-auth-field input::placeholder { color: #9ca3af; opacity: 1; }
+      .api-auth-field input:focus { border-color: #60a5fa; outline: 2px solid #2563eb55; }
+      .api-auth-actions { display: flex; gap: 8px; align-items: center; }
+      .api-auth-actions button {
+        min-height: 38px;
+        padding: 8px 13px;
+        border: 1px solid #3b82f6;
+        border-radius: 6px;
+        background: #2563eb;
+        color: #fff;
+        font: 600 14px/1.2 system-ui, sans-serif;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .api-auth-actions button:hover { background: #1d4ed8; }
+      .api-auth-actions button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+      #api-auth-status, #webmcp-status { grid-column: 1 / -1; color: #aeb7c4; }
+      #webmcp-status { margin-top: 2px; }
+      @media (max-width: 760px) {
+        #api-auth-form { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); }
+        .api-auth-actions { grid-column: 1 / -1; }
+      }
+      @media (max-width: 520px) {
+        #api-auth-form { grid-template-columns: minmax(0, 1fr); }
+        .api-auth-actions { flex-wrap: wrap; }
+        #api-auth-status, #webmcp-status { grid-column: 1; }
+      }
+    </style>
   </head>
   <body>
-    <section aria-label="Acesso à API" style="font:14px system-ui,sans-serif;padding:12px 18px;border-bottom:1px solid #ddd;background:#f8fafc;color:#334155">
-      <form id="api-auth-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <label for="api-email">E-mail:</label>
-        <input id="api-email" type="email" autocomplete="username" placeholder="joel.quintana@iainfinito.com.br" required style="min-width:250px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
-        <label for="api-password">Senha:</label>
-        <input id="api-password" type="password" autocomplete="current-password" minlength="12" maxlength="72" required aria-label="Senha (12 a 72 bytes)" style="min-width:200px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
-        <button type="button" id="api-auth-setup" style="padding:7px 12px;border:1px solid #94a3b8;border-radius:6px;background:white;cursor:pointer">Criar conta inicial</button>
-        <button type="submit" style="padding:7px 12px;border:1px solid #2563eb;border-radius:6px;background:#2563eb;color:white;cursor:pointer">Entrar</button>
+    <section id="api-auth-panel" aria-label="Acesso à API">
+      <form id="api-auth-form">
+        <div class="api-auth-field">
+          <label for="api-email">E-mail</label>
+          <input id="api-email" type="email" autocomplete="username" placeholder="joel.quintana@iainfinito.com.br" required />
+        </div>
+        <div class="api-auth-field">
+          <label for="api-password">Senha</label>
+          <input id="api-password" type="password" autocomplete="current-password" minlength="12" maxlength="72" required aria-label="Senha (12 a 72 bytes)" />
+        </div>
+        <div class="api-auth-actions">
+          <button type="button" id="api-auth-setup">Criar conta inicial</button>
+          <button type="submit">Entrar</button>
+        </div>
         <span id="api-auth-status" role="status" aria-live="polite">A conta inicial só pode ser criada uma vez.</span>
       </form>
-      <div id="webmcp-status" role="status" aria-live="polite" style="margin-top:6px">Carregando ferramentas WebMCP…</div>
+      <div id="webmcp-status" role="status" aria-live="polite">Carregando ferramentas WebMCP…</div>
     </section>
     <div id="scalar-root"></div>
     <script src="/static/js/webmcp.js"></script>
