@@ -198,6 +198,112 @@ paths:
         '500':
           description: Internal server error
 
+  /mcp:
+    post:
+      summary: MCP Streamable HTTP endpoint
+      description: |-
+        Endpoint MCP para conectar agentes e clientes compatíveis. Envie mensagens JSON-RPC 2.0 no corpo, incluindo `initialize`, `tools/list` e `tools/call`. O bearer JWT é obrigatório e deve incluir o escopo da ferramenta chamada. `create_job` exige `write`; consultas e download exigem `read`; `delete_job` exige `delete`. Para iniciar, envie `initialize` com `protocolVersion`, `capabilities` e `clientInfo`; reutilize o `Mcp-Session-Id` retornado nas solicitações seguintes e envie `MCP-Protocol-Version`.
+      operationId: mcpStreamableHttp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MCPJSONRPCRequest'
+            examples:
+              initialize:
+                summary: Inicializar uma sessão MCP
+                value:
+                  jsonrpc: '2.0'
+                  id: 1
+                  method: initialize
+                  params:
+                    protocolVersion: '2025-03-26'
+                    capabilities: {}
+                    clientInfo:
+                      name: meu-agente
+                      version: '1.0.0'
+              listTools:
+                summary: Listar as ferramentas disponíveis
+                value:
+                  jsonrpc: '2.0'
+                  id: 2
+                  method: tools/list
+                  params: {}
+              callTool:
+                summary: Invocar uma ferramenta MCP
+                value:
+                  jsonrpc: '2.0'
+                  id: 3
+                  method: tools/call
+                  params:
+                    name: list_jobs
+                    arguments: {}
+      responses:
+        '200':
+          description: Resposta JSON-RPC ou fluxo Server-Sent Events, conforme Accept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MCPJSONRPCResponse'
+            text/event-stream:
+              schema:
+                type: string
+        '202':
+          description: Notificação JSON-RPC aceita sem corpo de resposta.
+        '400':
+          description: Requisição MCP inválida ou versão de protocolo ausente.
+        '401':
+          description: Bearer JWT ausente, inválido ou expirado.
+        '403':
+          description: O JWT não contém o escopo necessário para a ferramenta.
+        '404':
+          description: Sessão MCP desconhecida ou encerrada.
+        '406':
+          description: O cabeçalho Accept não oferece JSON nem Server-Sent Events.
+        '503':
+          description: Autenticação MCP ainda não configurada no servidor.
+    get:
+      summary: Abrir fluxo MCP Server-Sent Events
+      description: Abre o fluxo de eventos da sessão MCP identificada por `Mcp-Session-Id`.
+      parameters:
+        - name: Mcp-Session-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: MCP-Protocol-Version
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fluxo de eventos MCP.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          description: Bearer JWT ausente, inválido ou expirado.
+        '404':
+          description: Sessão MCP desconhecida ou encerrada.
+    delete:
+      summary: Encerrar sessão MCP
+      parameters:
+        - name: Mcp-Session-Id
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sessão encerrada.
+        '401':
+          description: Bearer JWT ausente, inválido ou expirado.
+        '404':
+          description: Sessão MCP desconhecida ou encerrada.
+
 components:
   securitySchemes:
     BearerAuth:
@@ -205,6 +311,42 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    MCPJSONRPCRequest:
+      type: object
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ['2.0']
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        method:
+          type: string
+          example: tools/list
+        params:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    MCPJSONRPCResponse:
+      type: object
+      properties:
+        jsonrpc:
+          type: string
+          enum: ['2.0']
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+            - type: 'null'
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
     GlobalLeadsPage:
       type: object
       properties:

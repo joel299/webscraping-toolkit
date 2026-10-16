@@ -208,7 +208,7 @@ Não versione o arquivo de credenciais.
 
 ### MCP autenticado e ferramentas WebMCP
 
-O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. O endpoint MCP e as rotas `/api/v1/*` exigem bearer JWT depois de configurar a chave. A chave fica em arquivo privado no perfil do Windows:
+O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. A rota também aparece no contrato OpenAPI exibido em `/api/docs`, com exemplos de `initialize`, `tools/list` e `tools/call`. O endpoint MCP e as rotas `/api/v1/*` exigem bearer JWT depois de configurar a chave. A chave fica em arquivo no perfil do Windows:
 
 ```powershell
 Set-Location C:\Users\Usuario\Documents\webscraping-toolkit

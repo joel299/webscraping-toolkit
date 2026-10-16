@@ -195,3 +195,18 @@ func TestRESTAPIRequiresJWTWhenConfigured(t *testing.T) {
 		t.Fatalf("read-only REST write status = %d, want 403", recorder.Code)
 	}
 }
+
+func TestOpenAPIDocumentsMCPRoute(t *testing.T) {
+	server := newTestServerWithRepo(t, &mockJobRepo{})
+	request := httptest.NewRequest(http.MethodGet, "/static/spec/spec.yaml", http.NoBody)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("OpenAPI spec status = %d, want 200", recorder.Code)
+	}
+	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Errorf("OpenAPI spec does not document %q", expected)
+		}
+	}
+}
