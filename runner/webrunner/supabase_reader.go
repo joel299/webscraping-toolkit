@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -226,55 +226,92 @@ func (r supabaseDatabaseReader) ListGlobalLeads(ctx context.Context, limit, offs
 	if offset < 0 {
 		offset = 0
 	}
-	links, err := r.links(ctx, "")
+	query := fmt.Sprintf("select=place_id,cid,place_name,category,address,phone,website,emails,email,review_rating,review_count,latitude,longitude,google_maps_link&order=place_name.asc,place_id.asc&limit=%d&offset=%d", limit, offset)
+	data, headers, err := r.client.Do(ctx, http.MethodGet, "prospect_leads_google", query, nil, "count=exact")
 	if err != nil {
 		return web.GlobalLeadsPage{}, err
 	}
-	unique := make([]relation, 0, len(links))
-	seen := map[string]bool{}
+	var leads []remoteLead
+	if err = json.Unmarshal(data, &leads); err != nil {
+		return web.GlobalLeadsPage{}, err
+	}
+	total := contentRangeTotal(headers.Get("Content-Range"), len(leads))
+	if len(leads) == 0 {
+		return web.GlobalLeadsPage{Items: []web.Place{}, Total: total, Limit: limit, Offset: offset}, nil
+	}
+	ids := make([]string, 0, len(leads))
+	for _, lead := range leads {
+		ids = append(ids, lead.PlaceID)
+	}
+	links, err := r.linksForPlaceIDs(ctx, ids)
+	if err != nil {
+		return web.GlobalLeadsPage{}, err
+	}
+	firstSearchByPlace := make(map[string]string, len(ids))
 	for _, link := range links {
-		if !seen[link.PlaceID] {
-			seen[link.PlaceID] = true
-			unique = append(unique, link)
+		if _, ok := firstSearchByPlace[link.PlaceID]; !ok {
+			firstSearchByPlace[link.PlaceID] = link.SearchID
 		}
-	}
-	leads, err := r.fetchLeads(ctx, unique)
-	if err != nil {
-		return web.GlobalLeadsPage{}, err
 	}
 	jobNames := map[string]string{}
-	if len(links) > 0 {
-		searches, _, e := r.listSearches(ctx, 0, 10000, false)
-		if e != nil {
-			return web.GlobalLeadsPage{}, e
-		}
-		for _, s := range searches {
-			jobNames[s.SearchID] = s.JobName
-		}
+	searches, _, err := r.listSearches(ctx, 0, 10000, false)
+	if err != nil {
+		return web.GlobalLeadsPage{}, err
 	}
-	sort.Slice(leads, func(i, j int) bool {
-		if leads[i].PlaceName == leads[j].PlaceName {
-			return leads[i].PlaceID < leads[j].PlaceID
-		}
-		return leads[i].PlaceName < leads[j].PlaceName
-	})
-	total := len(leads)
-	if offset > total {
-		offset = total
+	for _, s := range searches {
+		jobNames[s.SearchID] = s.JobName
 	}
-	end := min(offset+limit, total)
-	items := make([]web.Place, 0, end-offset)
-	for _, lead := range leads[offset:end] {
-		link := unique[0]
-		for _, candidate := range unique {
-			if candidate.PlaceID == lead.PlaceID {
-				link = candidate
+	items := make([]web.Place, 0, len(leads))
+	for _, lead := range leads {
+		searchID := firstSearchByPlace[lead.PlaceID]
+		items = append(items, remoteLeadToPlace(lead, searchID, jobNames[searchID]))
+	}
+	return web.GlobalLeadsPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+func contentRangeTotal(value string, fallback int) int {
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 || parts[1] == "*" {
+		return fallback
+	}
+	total, err := strconv.Atoi(parts[1])
+	if err != nil || total < 0 {
+		return fallback
+	}
+	return total
+}
+
+func (r supabaseDatabaseReader) linksForPlaceIDs(ctx context.Context, ids []string) ([]relation, error) {
+	if len(ids) == 0 {
+		return []relation{}, nil
+	}
+	var all []relation
+	for start := 0; start < len(ids); start += 100 {
+		end := min(start+100, len(ids))
+		quoted := make([]string, 0, end-start)
+		for _, id := range ids[start:end] {
+			// QueryEscape protects PostgREST's quoted IN-list values, including
+			// punctuation that may appear in upstream place identifiers.
+			quoted = append(quoted, "%22"+url.QueryEscape(id)+"%22")
+		}
+		filter := "place_id=in.(" + strings.Join(quoted, ",") + ")"
+		for offset := 0; ; offset += 1000 {
+			query := "select=search_id,place_id,result_order&" + filter + fmt.Sprintf("&order=result_order.asc,discovered_at.asc,created_at.asc&limit=1000&offset=%d", offset)
+			data, _, err := r.client.Do(ctx, http.MethodGet, "prospect_search_leads", query, nil, "")
+			if err != nil {
+				return nil, err
+			}
+			var page []relation
+			if err = json.Unmarshal(data, &page); err != nil {
+				return nil, err
+			}
+			all = append(all, page...)
+			if len(page) < 1000 {
 				break
 			}
 		}
-		items = append(items, remoteLeadToPlace(lead, link.SearchID, jobNames[link.SearchID]))
 	}
-	return web.GlobalLeadsPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+	return all, nil
 }
 
 func (r supabaseDatabaseReader) ExportCSV(ctx context.Context, id, path string) error {
