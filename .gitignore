@@ -12,5 +12,6 @@ google-maps-scraper-gru86
 .env
 .env.local
 .secrets/
+recovery-backups/
 /tmp/prospect_database_url
 scratch/

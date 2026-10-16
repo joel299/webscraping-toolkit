@@ -13,7 +13,7 @@
 ## ADR-003: Row Level Security & Server-Side Secret Management
 - **Status**: Accepted
 - **Context**: Direct browser access to Supabase is prohibited in Phase 1.
-- **Decision**: Enable RLS, revoke `anon`/`authenticated` table grants, and read DSN server-side from `PROSPECT_DATABASE_URL_FILE`.
+- **Decision**: Enable RLS, revoke `anon`/`authenticated` table grants, and access Supabase only from the backend through HTTPS/PostgREST using `SUPABASE_SERVICE_ROLE_KEY`. The container keeps SQLite only for its durable atomic work queue.
 
 ## ADR-004: Protection of Commercial SDR Pipeline Fields
 - **Status**: Accepted

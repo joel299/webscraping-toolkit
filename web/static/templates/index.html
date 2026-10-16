@@ -438,26 +438,25 @@
             if (statusEl) statusEl.textContent = 'Carregando empresas encontradas em todas as pesquisas...';
             
             try {
-                const headers = {};
-                const jwt = sessionStorage.getItem('central-leads-jwt');
-                if (jwt) headers.Authorization = `Bearer ${jwt}`;
-                const res = await fetch('/api/v1/leads?limit=500&offset=0', {headers});
-                if (!res.ok) {
-                    if (statusEl) statusEl.textContent = res.status === 401
-                        ? 'Sessão sem JWT válido. Abra Integrações e configure o token.'
-                        : 'Nenhuma pesquisa encontrada.';
-                    updateLeadsBadge(0);
-                    renderGlobalLeadsUI([]);
-                    return;
+                const items = [];
+                let offset = 0;
+                let total = Infinity;
+                while (offset < total) {
+                    const res = await fetch(`/ui/leads?limit=500&offset=${offset}`);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    const batch = Array.isArray(data.items) ? data.items : [];
+                    total = Number(data.total) || 0;
+                    items.push(...batch);
+                    if (batch.length === 0) break;
+                    offset += batch.length;
                 }
-                
-                const data = await res.json();
-                const items = Array.isArray(data.items) ? data.items : [];
 
                 if (items.length === 0) {
-                    if (statusEl) statusEl.textContent = 'Nenhuma pesquisa iniciada ainda.';
+                    if (statusEl) statusEl.textContent = 'Nenhum lead encontrado nas pesquisas concluídas.';
                     updateLeadsBadge(0);
                     renderGlobalLeadsUI([]);
+                    if (statusEl) statusEl.textContent = 'Nenhum lead encontrado nas pesquisas concluídas.';
                     return;
                 }
 
@@ -476,7 +475,10 @@
                 filterGlobalLeads();
             } catch(err) {
                 console.error('Erro ao carregar leads globais:', err);
-                if (statusEl) statusEl.textContent = 'Erro ao carregar leads globais.';
+                globalLeadsData = [];
+                updateLeadsBadge(0);
+                renderGlobalLeadsUI([]);
+                if (statusEl) statusEl.textContent = 'Falha ao carregar os leads. Tente atualizar a página.';
             }
         }
 

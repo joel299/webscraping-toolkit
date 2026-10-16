@@ -214,12 +214,39 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 		t.Fatal("submit preparation must not depend on the button click handler")
 	}
 
-	if !strings.Contains(body, `fetch('/api/v1/leads?limit=500&offset=0', {headers})`) {
-		t.Fatal("global leads must use the aggregated JSON read endpoint")
+	if !strings.Contains(body, "fetch(`/ui/leads?limit=500&offset=${offset}`)") {
+		t.Fatal("global leads UI must use the same-origin consolidated endpoint")
 	}
 
 	if strings.Contains(body, `fetch('/api/v1/jobs')`) || strings.Contains(body, `fetch('/view?id='`) {
 		t.Fatal("global leads must not perform the sequential jobs/view N+1 read path")
+	}
+}
+
+func TestUIGlobalLeadsEndpointReturnsConsolidatedResults(t *testing.T) {
+	t.Setenv("PROSPECT_READ_MODE", "current")
+	jobID := "11111111-1111-1111-1111-111111111111"
+	dataFolder := t.TempDir()
+	csv := "place_id,title,address,latitude,longitude,link,category,phone,website,review_rating,review_count\n" +
+		"place-1,Farmácia A,Rua A,-20.4,-54.6,https://maps.test/a,Farmácia,111,,4.5,10\n"
+	if err := os.WriteFile(filepath.Join(dataFolder, jobID+".csv"), []byte(csv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &mockJobRepo{jobs: []Job{{ID: jobID, Name: "Farmácias — Campo Grande", Status: StatusOK}}}
+	srv := newTestServerWithRepo(t, repo)
+	srv.svc = NewService(repo, dataFolder)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/leads?limit=500&offset=0", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /ui/leads status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"total":1`, `"title":"Farmácia A"`, `"job_name":"Farmácias — Campo Grande"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("response missing %q: %s", want, rec.Body.String())
+		}
 	}
 }
 

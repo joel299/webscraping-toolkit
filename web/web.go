@@ -96,6 +96,7 @@ func New(svc *Service, addr string) (*Server, error) {
 
 		ans.viewJob(w, r)
 	})
+	mux.HandleFunc("/ui/leads", ans.uiGlobalLeads)
 	mux.HandleFunc("/", ans.index)
 
 	// api routes
@@ -723,6 +724,24 @@ func (s *Server) apiGlobalLeads(r *http.Request) (GlobalLeadsPage, error) {
 		offset = parsed
 	}
 	return s.svc.ListGlobalLeads(r.Context(), limit, offset)
+}
+
+// uiGlobalLeads serves the same-origin lead view used by the browser app.
+// The public API route remains JWT protected; this follows the existing UI
+// routes (/jobs, /view, and /download) used by the browser interface.
+func (s *Server) uiGlobalLeads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: methodNotAllowedMessage})
+		return
+	}
+	page, err := s.apiGlobalLeads(r)
+	if err != nil {
+		log.Printf("load UI global leads: %v", err)
+		renderJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "failed to load global leads"})
+		return
+	}
+	renderJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) apiGetJob(w http.ResponseWriter, r *http.Request) {
