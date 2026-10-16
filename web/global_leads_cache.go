@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -209,11 +211,23 @@ func (s *Service) listLocalGlobalLeads(ctx context.Context, limit, offset int) (
 		}
 
 		for _, place := range places {
-			key := localPlaceKey(place)
-			if _, ok := seen[key]; ok {
+			keys := localPlaceKeys(place)
+			duplicate := false
+			for _, key := range keys {
+				if _, ok := seen[key]; ok {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				for _, key := range keys {
+					seen[key] = struct{}{}
+				}
 				continue
 			}
-			seen[key] = struct{}{}
+			for _, key := range keys {
+				seen[key] = struct{}{}
+			}
 			place.JobID = job.ID
 			place.JobName = job.Name
 			items = append(items, place)
@@ -234,14 +248,66 @@ func (s *Service) listLocalGlobalLeads(ctx context.Context, limit, offset int) (
 	return GlobalLeadsPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
 }
 
-func localPlaceKey(place Place) string {
-	if place.PlaceID != "" {
-		return "id:" + strings.ToLower(strings.TrimSpace(place.PlaceID))
+// localPlaceKeys returns stable identity aliases for one business. A matching
+// normalized phone and address is the primary cross-search identity; the Maps
+// place ID also joins records when one search omitted or changed contact data.
+func localPlaceKeys(place Place) []string {
+	keys := make([]string, 0, 2)
+	phone := normalizePhone(place.Phone)
+	address := normalizeBusinessAddress(place.Title, place.Address)
+	if phone != "" && address != "" {
+		keys = append(keys, "phone-address:"+phone+"|"+address)
 	}
-	if place.Link != "" {
-		return "link:" + strings.ToLower(strings.TrimSpace(place.Link))
+	if placeID := normalizeIdentityText(place.PlaceID); placeID != "" {
+		keys = append(keys, "place-id:"+placeID)
 	}
-	return "name:" + strings.ToLower(strings.TrimSpace(place.Title)) + "|address:" + strings.ToLower(strings.TrimSpace(place.Address))
+	if len(keys) > 0 {
+		return keys
+	}
+	if link := strings.TrimSpace(strings.SplitN(place.Link, "?", 2)[0]); link != "" {
+		return []string{"link:" + strings.ToLower(link)}
+	}
+	return []string{"name-address:" + normalizeIdentityText(place.Title) + "|" + normalizeIdentityText(place.Address)}
+}
+
+func normalizePhone(phone string) string {
+	var digits strings.Builder
+	for _, r := range phone {
+		if unicode.IsDigit(r) {
+			digits.WriteRune(r)
+		}
+	}
+	value := digits.String()
+	// Google results sometimes include Brazil's country code and sometimes do not.
+	if strings.HasPrefix(value, "55") && (len(value) == 12 || len(value) == 13) {
+		value = value[2:]
+	}
+	return value
+}
+
+func normalizeBusinessAddress(title, address string) string {
+	value := normalizeIdentityText(address)
+	name := normalizeIdentityText(title)
+	// Some Google records prefix the address with the business name. Remove
+	// that prefix so it matches the same street address without the name.
+	if name != "" && strings.HasPrefix(value, name) {
+		value = strings.TrimPrefix(value, name)
+	}
+	return value
+}
+
+func normalizeIdentityText(value string) string {
+	value = strings.ToLower(norm.NFD.String(strings.TrimSpace(value)))
+	var normalized strings.Builder
+	for _, r := range value {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
 }
 
 // SetGlobalLeadsCache enables the injectable cache used by the global leads read path.

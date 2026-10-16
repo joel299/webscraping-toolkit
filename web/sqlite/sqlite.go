@@ -143,6 +143,25 @@ func (repo *repo) ClaimPending(ctx context.Context) (*web.Job, error) {
 	return &job, nil
 }
 
+// RecoverWorking requeues jobs that were interrupted while the process was down.
+// It is called once during runner startup, before any workers begin claiming jobs.
+func (repo *repo) RecoverWorking(ctx context.Context) (int64, error) {
+	result, err := repo.db.ExecContext(ctx,
+		`UPDATE jobs SET status = ?, updated_at = ? WHERE status = ?`,
+		web.StatusPending, time.Now().UTC().Unix(), web.StatusWorking,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("requeue interrupted jobs: %w", err)
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count requeued jobs: %w", err)
+	}
+
+	return count, nil
+}
+
 func (repo *repo) Count(ctx context.Context, params web.SelectParams) (int, error) {
 	q := `SELECT COUNT(*) from jobs`
 

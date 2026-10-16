@@ -14,6 +14,7 @@ import (
 
 	"github.com/gosom/google-maps-scraper/deduper"
 	"github.com/gosom/google-maps-scraper/exiter"
+	"github.com/gosom/google-maps-scraper/internal/supabaseapi"
 	"github.com/gosom/google-maps-scraper/runner"
 	"github.com/gosom/google-maps-scraper/shadow"
 	"github.com/gosom/google-maps-scraper/tlmt"
@@ -30,9 +31,28 @@ type webrunner struct {
 	svc              *web.Service
 	cfg              *runner.Config
 	setupMate        func(context.Context, io.Writer, *web.Job) (mateRunner, error)
-	shadowWriter     *shadow.Writer
+	shadowWriter     searchResultWriter
 	globalLeadsCache io.Closer
 	jobStore         io.Closer
+}
+
+type searchResultWriter interface {
+	scrapemate.ResultWriter
+	Close() error
+	SetJobContext(string, string)
+	RegisterSearch(context.Context, *shadow.SearchContext) error
+	UpdateSearchStatus(context.Context, string, string, string) error
+	LinkLeadToSearch(context.Context, string, string, int) error
+	FindCompletedSearch(context.Context, string, string) (*shadow.SearchContext, error)
+	FetchLeadsForSearch(context.Context, string, int) ([]*shadow.ProspectLead, error)
+	WriteLeadsToCSVFile([]*shadow.ProspectLead, string) error
+}
+
+func closeJobRepository(repo web.JobRepository) error {
+	if closer, ok := repo.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 type mateRunner interface {
@@ -125,21 +145,38 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 
 	dbpath := filepath.Join(cfg.DataFolder, dbfname)
 
-	repo, err := sqlite.New(dbpath)
+	localRepo, err := sqlite.New(dbpath)
 	if err != nil {
 		return nil, err
 	}
-	repoCloser, _ := repo.(io.Closer)
-
-	var shadowWriter *shadow.Writer
-	if rawWriter := shadow.NewWriterFromEnv(); rawWriter != nil {
-		shadowWriter, _ = rawWriter.(*shadow.Writer)
+	client, err := supabaseapi.NewFromEnv()
+	if err != nil {
+		_ = closeJobRepository(localRepo)
+		return nil, fmt.Errorf("Supabase is required for active job/lead persistence: %w", err)
 	}
+	supabaseWriter, err := shadow.NewSupabaseWriterFromEnv()
+	if err != nil {
+		_ = closeJobRepository(localRepo)
+		return nil, fmt.Errorf("initialize Supabase lead persistence: %w", err)
+	}
+	repo := &supabaseJobRepository{local: localRepo, client: client}
+	var repoCloser io.Closer = repo
+	recovered, recoverErr := repo.RecoverWorking(context.Background())
+	if recoverErr != nil {
+		if repoCloser != nil {
+			_ = repoCloser.Close()
+		}
+		return nil, fmt.Errorf("recover interrupted web jobs: %w", recoverErr)
+	}
+	if recovered > 0 {
+		log.Printf("JOB_RECOVERY requeued=%d reason=previous_runner_shutdown", recovered)
+	}
+
+	var shadowWriter searchResultWriter = supabaseWriter
 
 	svc := web.NewService(repo, cfg.DataFolder)
-	if credentialStore, ok := repo.(web.CredentialStore); ok {
-		svc.SetCredentialStore(credentialStore)
-	}
+	svc.SetDatabaseReader(supabaseDatabaseReader{client: client})
+	svc.SetCredentialStore(repo)
 	var globalLeadsCache io.Closer
 	if cacheEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("PROSPECT_CACHE_ENABLED")), "true") || os.Getenv("PROSPECT_CACHE_ENABLED") == "1"; cacheEnabled {
 		redisCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -153,18 +190,12 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 			log.Printf("CACHE_ENABLED endpoint=global_leads ttl_seconds=45")
 		}
 	}
-	if shadowWriter != nil {
-		svc.SetDatabaseReader(databaseReader{writer: shadowWriter})
-	}
-
 	srv, err := web.New(svc, cfg.Addr)
 	if err != nil {
 		if repoCloser != nil {
 			_ = repoCloser.Close()
 		}
-		if shadowWriter != nil {
-			_ = shadowWriter.Close()
-		}
+		_ = supabaseWriter.Close()
 		if globalLeadsCache != nil {
 			_ = globalLeadsCache.Close()
 		}
@@ -468,7 +499,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	return w.svc.Update(ctx, job)
 }
 
-func defaultSetupMate(cfg *runner.Config, shadowWriter *shadow.Writer) func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
+func defaultSetupMate(cfg *runner.Config, shadowWriter searchResultWriter) func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
 	return func(ctx context.Context, writer io.Writer, job *web.Job) (mateRunner, error) {
 		opts := []func(*scrapemateapp.Config) error{
 			scrapemateapp.WithConcurrency(cfg.Concurrency),

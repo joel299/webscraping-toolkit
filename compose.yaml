@@ -19,7 +19,9 @@ services:
       - "${CENTRAL_DE_LEADS_BIND:-127.0.0.1}:${CENTRAL_DE_LEADS_PORT:-8086}:8086"
     environment:
       MCP_JWT_SECRET_FILE: /run/secrets/mcp_jwt_secret
-      PROSPECT_READ_MODE: ${PROSPECT_READ_MODE:-current}
+      PROSPECT_READ_MODE: ${PROSPECT_READ_MODE:-database}
+      SUPABASE_URL: ${SUPABASE_URL:?Configure SUPABASE_URL no .env}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Configure SUPABASE_SERVICE_ROLE_KEY no .env}
     secrets:
       - mcp_jwt_secret
     volumes:

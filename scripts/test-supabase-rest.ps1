@@ -2,24 +2,21 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$baseUrl = 'https://wuyvgmzbmuwcjjzmgccs.supabase.co'
-$key = [Environment]::GetEnvironmentVariable('SUPABASE_SERVICE_ROLE_KEY', 'Process')
-
-if ([string]::IsNullOrWhiteSpace($key)) {
-    Write-Host 'A chave nao esta definida nesta sessao. Digite-a no prompt oculto.' -ForegroundColor Yellow
-    $secureKey = Read-Host 'Supabase service_role / secret key' -AsSecureString
-    $keyPointer = [IntPtr]::Zero
-    try {
-        $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
-        $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
-    } finally {
-        if ($keyPointer -ne [IntPtr]::Zero) {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
-        }
-        $secureKey.Dispose()
-    }
-    if ([string]::IsNullOrWhiteSpace($key)) { throw 'A chave nao pode ficar vazia.' }
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$envFile = Join-Path $projectRoot '.env'
+if (-not (Test-Path -LiteralPath $envFile)) {
+    throw 'Arquivo .env ausente. Configure uma vez com scripts/set-supabase-env.ps1.'
 }
+$settings = @{}
+foreach ($line in Get-Content -LiteralPath $envFile) {
+    if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
+        $settings[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'")
+    }
+}
+$baseUrl = $settings['SUPABASE_URL']
+$key = $settings['SUPABASE_SERVICE_ROLE_KEY']
+if ([string]::IsNullOrWhiteSpace($baseUrl)) { throw 'SUPABASE_URL ausente no .env.' }
+if ([string]::IsNullOrWhiteSpace($key)) { throw 'SUPABASE_SERVICE_ROLE_KEY ausente no .env.' }
 # Supabase API keys use URL-safe text and never contain whitespace. Clipboard
 # pastes can insert line breaks in the middle, so remove them before headers.
 $key = [System.Text.RegularExpressions.Regex]::Replace($key, '[\s\x00-\x1F\x7F]', '')
@@ -30,7 +27,7 @@ if (-not ($key.StartsWith('eyJ') -or $key.StartsWith('sb_secret_'))) {
     throw 'O valor carregado nao tem o prefixo de uma chave secret/service_role Supabase. Recarregue a chave pelo prompt.'
 }
 
-$uri = "$baseUrl/rest/v1/prospect_leads_google?select=place_id&limit=1"
+$uri = "$($baseUrl.TrimEnd('/'))/rest/v1/prospect_leads_google?select=place_id&limit=1"
 $response = $null
 $headers = @{ apikey = $key }
 # Legacy service_role keys are JWTs and also establish the database role.

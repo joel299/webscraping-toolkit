@@ -12,7 +12,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-job%20queue-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Sistema de prospecção comercial baseado em Google Maps, com scraping em Go, interface web para criação e acompanhamento de pesquisas, mapa interativo, base consolidada de leads e persistência incremental em PostgreSQL/Supabase.
+Sistema de prospecção comercial baseado em Google Maps, com scraping em Go, interface web para criação e acompanhamento de pesquisas, mapa interativo, base consolidada de leads e persistência ativa via Supabase REST.
 
 O projeto evolui o motor open source [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) para um fluxo orientado a prospecção, provenance de pesquisas, persistência canônica e leitura controlada a partir do banco.
 
@@ -28,18 +28,19 @@ Frontend (HTMX + Leaflet)
         v
 Go Web/API
         |
-        +--> SQLite jobs.db
+        +--> SQLite jobs.db (fila durável do container)
         |      |
         |      +--> atomic job claim
         |
         v
 Web Runner
         |
-        +--> PROSPECT_READ_MODE=database
+        +--> Supabase REST API (fonte persistente)
         |      |
-        |      +--> PostgreSQL/Supabase HIT
+        |      +--> job/status em prospect_searches
         |      |      |
-        |      |      +--> CSV + provenance
+        |      |      +--> leads em prospect_leads_google
+        |      |      +--> vínculos em prospect_search_leads
         |      |
         |      +--> MISS/PARTIAL -> scraper
         |
@@ -55,7 +56,7 @@ Web Runner
         fanout
           |            |
           v            v
-        CSV       PostgreSQL/Supabase
+        CSV       Supabase REST API
                      |
                      +--> canonical lead
                      +--> search provenance
@@ -73,7 +74,7 @@ Web Runner
 - Detalhes comerciais por lead.
 - Exportação CSV.
 - API HTTP com documentação integrada.
-- Persistência incremental em PostgreSQL/Supabase.
+- Persistência ativa de jobs, status, leads e provenance na API REST do Supabase.
 - Provenance entre pesquisa e lead por `prospect_search_leads`.
 - Identidade canônica baseada em `place_id`, `cid` e telefone/WhatsApp normalizado.
 - UPSERT não destrutivo para preservar estado comercial já existente.
@@ -95,8 +96,8 @@ Web Runner
 | UI dinâmica | HTMX |
 | Mapas | Leaflet + OpenStreetMap |
 | Job queue local | SQLite |
-| Banco persistente | PostgreSQL / Supabase |
-| Driver PostgreSQL | pgx / pgxpool |
+| Banco persistente | Supabase REST / PostgREST |
+| Fila operacional | SQLite no volume Docker |
 | Containers | Docker |
 | CI | GitHub Actions |
 | Testes | Go test + Testify |
@@ -118,13 +119,13 @@ PROSPECT_READ_MODE=database
 
 ### `current`
 
-É o modo seguro/default. A pesquisa executa o scraper normalmente e os resultados são persistidos incrementalmente.
+O container usa `database` como modo padrão: painel e cache consultam o Supabase. Cada nova busca e transição de status é sincronizada para `prospect_searches`; cada resultado do scraper é enviado para `prospect_leads_google` e relacionado em `prospect_search_leads`. O CSV local e a fila SQLite continuam no volume do container para recuperação e exportação.
 
 ### `database`
 
-Tenta localizar uma pesquisa concluída equivalente no PostgreSQL. Se houver dados suficientes para o depth solicitado, os leads persistidos são usados para gerar o resultado. Se houver miss, resultado parcial ou falha de provenance, o fluxo retorna ao scraper atual.
+Tenta localizar uma pesquisa concluída equivalente no Supabase. Se houver dados suficientes para o depth solicitado, os leads persistidos são usados para gerar o resultado. Se houver miss, resultado parcial ou falha de provenance, o fluxo retorna ao scraper atual.
 
-O modo `database` é controlado por feature flag e deve ser validado antes de ser adotado como default operacional.
+O compose define `PROSPECT_READ_MODE=database` por padrão. Defina `current` apenas para diagnóstico ou operação offline; a persistência de novos jobs e leads continua exigindo Supabase.
 
 ## Modelo de dados
 
@@ -160,6 +161,8 @@ Mais detalhes:
 
 O mesmo `compose.yaml` funciona no Docker Desktop (Windows) e no Docker Engine (Linux). Ele inicia a interface e o scraper em um container Linux, persiste os dados em um volume Docker e monta a chave JWT como secret. O Docker daemon precisa estar iniciado.
 
+Antes de subir o container, configure `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no `.env` do projeto. O Compose injeta esses valores somente no backend; a inicialização falha se as tabelas REST necessárias não estiverem acessíveis.
+
 Crie a chave uma vez na pasta do projeto. No PowerShell:
 
 ```powershell
@@ -192,33 +195,24 @@ Acesse:
 http://localhost:8086
 ```
 
-### 3. Executar com persistência PostgreSQL/Supabase
+### 3. Configurar Supabase REST
 
-Crie um arquivo de secret fora do Git contendo somente a connection string PostgreSQL.
-
-No Windows, configure pelo PowerShell sem digitar a senha como argumento nem salvá-la no histórico. Para Supabase, copie Host, Port e User em **Dashboard → Connect → Session pooler**; o endereço `https://<project-ref>.supabase.co` é da API, não é o host PostgreSQL:
+O projeto usa a URL HTTPS e a chave service_role/secret da API REST do Supabase. Não use host, porta, senha PostgreSQL ou o overlay `compose.postgres.yaml` para esta configuração. As credenciais ficam no `.env` local, ignorado pelo Git.
 
 ```powershell
 Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
-.\scripts\configure-postgres.ps1
+.\scripts\set-supabase-env.ps1
+.\scripts\test-supabase-rest.ps1
 ```
 
-O script solicita host, porta, banco, usuário e senha oculta; grava a DSN em `%APPDATA%\CentralDeLeads\postgres-url.txt`, com ACL restrita ao usuário atual, e define `PROSPECT_DATABASE_URL_FILE` no ambiente do usuário. Esse script configura uma execução nativa no Windows. Para Docker ou Linux, grave a DSN em `.secrets/prospect_database_url` e inicie com os dois arquivos Compose:
-
-```text
-docker compose -f compose.yaml -f compose.postgres.yaml up -d --build
-```
-
-O Compose monta o arquivo como `/run/secrets/prospect_database_url`. Mantenha `PROSPECT_READ_MODE=current` até aplicar as migrations; depois defina `PROSPECT_READ_MODE=database` no `.env` ao lado do Compose.
-
-O schema suportado pela aplicação é `public.prospect_leads_google`, `public.prospect_searches` e `public.prospect_search_leads`. A tabela legada `public.google_maps` não é usada por este código. Aplique os arquivos SQL de `supabase/migrations` no banco correto antes de habilitar a leitura pelo PostgreSQL. Após confirmar as migrations, use no PowerShell:
+O assistente salva a URL e a chave no `.env` sem exibir a chave. O teste lê esse arquivo e verifica o endpoint REST. A migração do snapshot SQLite para as tabelas `prospect_searches`, `prospect_leads_google` e `prospect_search_leads` é feita pelo importador idempotente abaixo; primeiro rode sem `-execute` para revisar as contagens:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('PROSPECT_READ_MODE', 'database', 'User')
-$env:PROSPECT_READ_MODE = 'database'
+go run .\scripts\migrate_sqlite_to_supabase.go --data-dir .\recovery-backups\supabase-migration-20261016\data
+go run .\scripts\migrate_sqlite_to_supabase.go --data-dir .\recovery-backups\supabase-migration-20261016\data --execute
 ```
 
-Não versione arquivos de credenciais. `.secrets/` está excluída do Git e do contexto de build Docker.
+O importador preserva `jobs.db` e os CSVs, faz upsert sem excluir dados do destino e confirma as contagens REST ao final. Em execução, cada job e mudança de status são sincronizados para `prospect_searches`, os resultados são gravados em `prospect_leads_google` e seus vínculos em `prospect_search_leads`; o painel lê essas tabelas do Supabase. SQLite permanece apenas como fila de execução recuperável dentro do volume Docker.
 
 ### Cache de pesquisas
 
@@ -293,11 +287,11 @@ go run . -web -addr :8086 -data-folder webdata
 
 | Variável | Obrigatória | Descrição |
 | --- | --- | --- |
-| `PROSPECT_DATABASE_URL_FILE` | Não | Caminho para arquivo contendo a DSN PostgreSQL. Preferido para secrets. |
-| `PROSPECT_DATABASE_URL` | Não | DSN PostgreSQL direta. Use apenas em ambiente seguro. |
-| `PROSPECT_READ_MODE` | Não | `current` ou `database`. Default efetivo: `current`. |
+| `SUPABASE_URL` | Sim | URL HTTPS do projeto Supabase. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Sim | Chave administrativa apenas no backend/container; nunca exponha no frontend nem faça commit do `.env`. |
+| `PROSPECT_READ_MODE` | Não | `database` para ler do Supabase; `current` mantém leituras locais. O compose usa `database` por padrão. |
 | `PROSPECT_CACHE_ENABLED` | Não | `true`/`1` habilita o cache Redis somente para `GET /api/v1/leads`; default `false`. |
-| `PROSPECT_REDIS_URL` | Não | URL do Redis local; default `redis://127.0.0.1:6379/0`. Redis é apenas aceleração; PostgreSQL permanece a fonte de verdade. |
+| `PROSPECT_REDIS_URL` | Não | URL do Redis local; default `redis://127.0.0.1:6379/0`. Redis é apenas aceleração; Supabase permanece a fonte de verdade. |
 | `DISABLE_TELEMETRY` | Não | Use `1` para desabilitar telemetria do motor upstream. |
 | `PLAYWRIGHT_INSTALL_ONLY` | Não | Use `1` para executar apenas a instalação do Chromium via Playwright. |
 
@@ -346,8 +340,8 @@ Quando o contexto do scraping é cancelado, o fanout drena os resultados restant
 ## Segurança
 
 - Secrets são mantidos server-side.
-- Nenhuma credencial PostgreSQL deve ser enviada ao frontend.
-- Prefira `PROSPECT_DATABASE_URL_FILE` a DSNs em linha de comando.
+- A chave Supabase service_role/secret deve ficar apenas no backend/container e nunca ser enviada ao frontend.
+- A conexão ativa com Supabase usa HTTPS/PostgREST; o runtime não usa DSN nem conexão PostgreSQL direta.
 - Migrations são a fonte de verdade para alterações de schema.
 - RLS e grants do domínio persistente são definidos por migrations.
 - Logs de falha de provenance devem ser sanitizados.

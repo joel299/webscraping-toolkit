@@ -11,7 +11,7 @@ UI (Scrape Request)
         └─► [MISS] RegisterSearch (public.prospect_searches)
               └─► Gosom Scraper Engine
                     └─► Scrapemate Result Pipeline
-                          └─► shadow.Writer (ResultWriter with SearchContext)
+                          └─► shadow.SupabaseWriter (ResultWriter via PostgREST)
                                 ├─► ProspectLeadMapper (gmaps.Entry -> ProspectLead)
                                 ├─► PhoneNormalizer (NormalizePhoneBR)
                                 ├─► ProspectLeadValidator
@@ -34,4 +34,4 @@ UI (Scrape Request)
 
 ## Shadow Writer Lifecycle (GRU-92)
 
-The web runner creates one `shadow.Writer` during runner construction and reuses it for database-first reads, search registration, result persistence, and status updates across jobs. `NewWriterFromEnv` is not called from individual jobs. The writer owns and closes the environment-created `pgxpool.Pool` during runner shutdown; writers created with `NewWriter(pool, ...)` borrow the caller-owned pool. `Close` is idempotent, and operations after close return `ErrWriterClosed`.
+The web runner creates one `shadow.SupabaseWriter` and one Supabase REST client at startup. It validates access to the three required REST tables before starting. The writer persists leads and provenance over HTTPS/PostgREST; job repository calls mirror creation, claim, completion, and failure status to `prospect_searches`. The local SQLite volume remains the durable atomic work queue and stores the complete job payload; the dashboard and lead views use Supabase via the REST client. The active runtime does not use a PostgreSQL DSN or `pgxpool`.

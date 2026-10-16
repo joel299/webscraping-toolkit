@@ -4,16 +4,13 @@ package webrunner
 import (
 	"context"
 	"io"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gosom/google-maps-scraper/runner"
-	"github.com/gosom/google-maps-scraper/shadow"
 	"github.com/gosom/google-maps-scraper/web"
 	"github.com/gosom/scrapemate"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,19 +80,12 @@ func (w *recordingResultWriter) count() int {
 	return len(w.results)
 }
 
-func TestNewWebRunnerReusesAndClosesShadowWriter(t *testing.T) {
-	t.Setenv("PROSPECT_DATABASE_URL", "")
-	t.Setenv("PROSPECT_DATABASE_URL_FILE", filepath.Join(t.TempDir(), "missing-dsn"))
+func TestNewWebRunnerRequiresSupabaseConfiguration(t *testing.T) {
+	t.Setenv("SUPABASE_URL", "")
+	t.Setenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-	runnerInstance, err := New(&runner.Config{DataFolder: t.TempDir(), Addr: "127.0.0.1:0"})
-	require.NoError(t, err)
-	w := runnerInstance.(*webrunner)
-	require.NotNil(t, w.shadowWriter)
-
-	assert.NoError(t, w.Close(context.Background()))
-	assert.NoError(t, w.Close(context.Background()))
-	_, err = w.shadowWriter.FindCompletedSearch(context.Background(), "query", "location")
-	assert.ErrorIs(t, err, shadow.ErrWriterClosed)
+	_, err := New(&runner.Config{DataFolder: t.TempDir(), Addr: "127.0.0.1:0"})
+	require.ErrorContains(t, err, "Supabase is required for active job/lead persistence")
 }
 
 func TestScrapeJobMarksOKBeforeClosingMate(t *testing.T) {
