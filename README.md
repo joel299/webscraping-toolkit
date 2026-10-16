@@ -215,19 +215,38 @@ Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
 .\scripts\setup-mcp-auth.ps1
 ```
 
-Reinicie o servidor para ativar a autenticação. Gere um token curto (padrão de 24 horas) com:
+Reinicie o servidor para ativar a autenticação. Para um servidor remoto (por exemplo, publicado na tailnet), crie a conta inicial pela própria API/Scalar em `POST /api/v1/auth/setup` ou entre em `POST /api/v1/auth/login`. Esses endpoints assinam o token no servidor que atende o MCP; o token administrativo retornado inclui `token:issue`.
+
+Use esse token administrativo para chamar `POST /api/v1/tokens` e emitir o token próprio do Hermes, com apenas os escopos necessários. Por exemplo, `read` e `write` permitem consultar e iniciar pesquisas:
+
+```json
+{"subject":"stark-agent","scopes":["read","write"],"ttl":"720h"}
+```
+
+O token da conta e o token do agente são diferentes por desenho: têm escopos e, em geral, validade e horário de emissão diferentes. Guarde no Hermes somente o token do agente. O endpoint `/api/v1/tokens` retorna o token uma única vez.
+
+`scripts/generate-mcp-token.ps1` assina um token local usando a chave configurada nesta máquina. Use esse script somente quando o servidor MCP estiver rodando com a mesma chave. Uma chave criada no computador local não corresponde automaticamente à chave do servidor Tailnet; um token assinado por outra chave será rejeitado.
+
+No Hermes, configure o servidor HTTP com o cabeçalho `Authorization: Bearer <token-do-agente>`. Se o teste de `hermes mcp add` responder `401 no bearer token`, o servidor recebeu a chamada sem o cabeçalho de autorização; gerar outro token não resolve esse caso. Configure o cabeçalho explicitamente no `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  central-de-leads:
+    url: "https://joel.tail212bac.ts.net/mcp"
+    headers:
+      Authorization: "Bearer ${CENTRAL_DE_LEADS_TOKEN}"
+    connect_timeout: 45
+```
+
+Defina `CENTRAL_DE_LEADS_TOKEN` no ambiente do Hermes ou em `~/.hermes/.env`, sem o prefixo `Bearer`, e então execute `hermes mcp test central-de-leads` ou reinicie/recarregue o Hermes. A documentação oficial do Hermes descreve esse formato HTTP em [`mcp_servers` com `url` e `headers`](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
+
+Para um servidor local que use esta mesma chave, também é possível gerar diretamente um token de curta duração:
 
 ```powershell
 .\scripts\generate-mcp-token.ps1 -Subject "meu-agente" -Scopes "read,write,delete" -TTL "24h"
 ```
 
-O token aparece no terminal; trate-o como senha e não o envie em conversas ou repositórios. Para emitir tokens de agente pela API, gere primeiro um token administrativo local com o escopo adicional `token:issue`:
-
-```powershell
-.\scripts\generate-mcp-token.ps1 -Subject "administrador" -Scopes "read,write,delete,token:issue" -TTL "24h"
-```
-
-Cole esse token administrativo em **Authorize** no Scalar e chame `POST /api/v1/tokens` com `{"subject":"stark-agent","scopes":["read","write"],"ttl":"24h"}`. O endpoint exige o escopo `token:issue` e retorna o token do agente uma única vez. Não dê esse escopo ao token normal do agente. As permissões disponíveis são `read`, `write`, `delete` e `token:issue`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
+Trate qualquer token como senha e não o envie em conversas ou repositórios. As permissões disponíveis são `read`, `write`, `delete` e `token:issue`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
 
 Para disponibilizar o serviço somente na tailnet com HTTPS, com o app local em execução, use `tailscale serve --bg http://127.0.0.1:8086`. O cliente MCP deve conectar a `https://<MagicDNS-do-computador>/mcp` e enviar `Authorization: Bearer <token-do-agente>`. O acesso de rede continua sujeito às políticas de acesso da tailnet; o Funnel não é necessário.
 

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Central de Leads API
   version: 1.0.0
-  description: API para pesquisas e leads. A conta inicial é criada uma única vez em /api/v1/auth/setup; depois, use /api/v1/auth/login. As senhas ficam armazenadas como hashes no backend SQLite. O token de acesso expira em 30 dias.
+  description: API para pesquisas e leads. A conta inicial é criada uma única vez em /api/v1/auth/setup; depois, use /api/v1/auth/login. Esses endpoints emitem um token administrativo assinado pelo servidor. Use-o em /api/v1/tokens para emitir um token separado e com escopos reduzidos para o agente MCP. Não use um token gerado localmente com outra chave de assinatura. As senhas ficam armazenadas como hashes no backend SQLite. O token de acesso expira em 30 dias.
 
 servers:
   - url: /
@@ -75,7 +75,8 @@ paths:
   /api/v1/tokens:
     post:
       summary: Generate a scoped API and MCP access token
-      description: Issues a bearer JWT for up to 30 days. Requires an existing account JWT with the `token:issue` scope. The returned token is shown once; store it securely. Allowed scopes are `read`, `write`, `delete`, and `token:issue`.
+      description: >-
+        Emite no servidor um JWT Bearer para API/MCP, válido por até 30 dias. Requer o token da conta recebido em /api/v1/auth/setup ou /api/v1/auth/login com escopo token:issue. O token emitido é separado do token da conta, pois possui assunto, escopos e validade próprios; essa diferença é esperada. A resposta mostra o token uma única vez. Para Hermes, envie-o no cabeçalho HTTP Authorization: Bearer <token>. Se /mcp responder 401 "no bearer token", a requisição chegou sem esse cabeçalho; gerar outro token não corrige a ausência do cabeçalho. Escopos permitidos: read, write, delete e token:issue.
       operationId: createAccessToken
       requestBody:
         required: true
@@ -299,8 +300,8 @@ paths:
   /mcp:
     post:
       summary: MCP Streamable HTTP endpoint
-      description: |-
-        Endpoint MCP para conectar agentes e clientes compatíveis. Envie mensagens JSON-RPC 2.0 no corpo, incluindo `initialize`, `tools/list` e `tools/call`. O bearer JWT é obrigatório e deve incluir o escopo da ferramenta chamada. `create_job` exige `write`; consultas e download exigem `read`; `delete_job` exige `delete`. Para iniciar, envie `initialize` com `protocolVersion`, `capabilities` e `clientInfo`; reutilize o `Mcp-Session-Id` retornado nas solicitações seguintes e envie `MCP-Protocol-Version`.
+      description: >-
+        Endpoint MCP Streamable HTTP para conectar agentes e clientes compatíveis. Toda requisição deve enviar o cabeçalho HTTP Authorization com o valor Bearer <token emitido por este servidor>. Envie mensagens JSON-RPC 2.0 no corpo, incluindo `initialize`, `tools/list` e `tools/call`. O JWT deve incluir o escopo da ferramenta chamada. `create_job` exige `write`; consultas e download exigem `read`; `delete_job` exige `delete`. Um 401 "no bearer token" significa que o cliente não enviou o cabeçalho; um token criado com uma chave local diferente também não será aceito. Para iniciar, envie `initialize` com `protocolVersion`, `capabilities` e `clientInfo`; reutilize o `Mcp-Session-Id` retornado nas solicitações seguintes e envie `MCP-Protocol-Version`.
       operationId: mcpStreamableHttp
       requestBody:
         required: true
