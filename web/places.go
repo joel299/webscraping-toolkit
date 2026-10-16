@@ -136,6 +136,7 @@ func parsePlaces(r io.Reader) ([]Place, error) {
 		}
 
 		places = append(places, Place{
+			PlaceID:      get(row, "place_id"),
 			Title:        get(row, "title"),
 			Address:      get(row, "address"),
 			Latitude:     lat,

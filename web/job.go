@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -136,9 +138,48 @@ func (d *JobData) Validate() error {
 		return errors.New("missing max time")
 	}
 
-	if d.FastMode && (d.Lat == "" || d.Lon == "") {
+	latText := strings.TrimSpace(d.Lat)
+	lonText := strings.TrimSpace(d.Lon)
+	if latText != "" || lonText != "" {
+		if latText == "" || lonText == "" {
+			return errors.New("latitude and longitude must both be set")
+		}
+
+		lat, err := strconv.ParseFloat(latText, 64)
+		if err != nil || lat < -90 || lat > 90 {
+			return errors.New("invalid latitude")
+		}
+
+		lon, err := strconv.ParseFloat(lonText, 64)
+		if err != nil || lon < -180 || lon > 180 {
+			return errors.New("invalid longitude")
+		}
+
+		// The web form historically used 0,0 as its empty-field sentinel.
+		// Keep old saved jobs from searching around Null Island.
+		if lat == 0 && lon == 0 && d.FastMode {
+			return errors.New("missing geo coordinates")
+		}
+	} else if d.FastMode {
 		return errors.New("missing geo coordinates")
 	}
 
 	return nil
+}
+
+// GeoCoordinates returns optional map coordinates, ignoring the legacy 0,0
+// sentinel used by older web searches when no point was selected.
+func (d *JobData) GeoCoordinates() string {
+	lat := strings.TrimSpace(d.Lat)
+	lon := strings.TrimSpace(d.Lon)
+	if lat == "" || lon == "" {
+		return ""
+	}
+	if latValue, err := strconv.ParseFloat(lat, 64); err == nil && latValue == 0 {
+		if lonValue, err := strconv.ParseFloat(lon, 64); err == nil && lonValue == 0 {
+			return ""
+		}
+	}
+
+	return lat + "," + lon
 }

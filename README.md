@@ -182,6 +182,22 @@ http://localhost:8086
 
 Crie um arquivo de secret fora do Git contendo somente a connection string PostgreSQL.
 
+No Windows, configure pelo PowerShell sem digitar a senha como argumento nem salvá-la no histórico. Para Supabase, copie Host, Port e User em **Dashboard → Connect → Session pooler**; o endereço `https://<project-ref>.supabase.co` é da API, não é o host PostgreSQL:
+
+```powershell
+Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
+.\scripts\configure-postgres.ps1
+```
+
+O script solicita host, porta, banco, usuário e senha oculta; grava a DSN em `%APPDATA%\CentralDeLeads\postgres-url.txt`, com ACL restrita ao usuário atual, e define `PROSPECT_DATABASE_URL_FILE` no ambiente do usuário. Feche e reabra o terminal e reinicie a aplicação para carregar a configuração. O script mantém `PROSPECT_READ_MODE=current` até você aplicar as migrations.
+
+O schema suportado pela aplicação é `public.prospect_leads_google`, `public.prospect_searches` e `public.prospect_search_leads`. A tabela legada `public.google_maps` não é usada por este código. Aplique os arquivos SQL de `supabase/migrations` no banco correto antes de habilitar a leitura pelo PostgreSQL. Após confirmar as migrations, use no PowerShell:
+
+```powershell
+[Environment]::SetEnvironmentVariable('PROSPECT_READ_MODE', 'database', 'User')
+$env:PROSPECT_READ_MODE = 'database'
+```
+
 Exemplo de montagem:
 
 ```bash

@@ -128,7 +128,11 @@ func TestScrapeJobMarksOKBeforeClosingMate(t *testing.T) {
 	w := &webrunner{
 		svc: svc,
 		cfg: &runner.Config{DataFolder: t.TempDir(), Concurrency: 1},
-		setupMate: func(_ context.Context, _ io.Writer, _ *web.Job) (mateRunner, error) {
+		setupMate: func(_ context.Context, output io.Writer, _ *web.Job) (mateRunner, error) {
+			if _, err := io.WriteString(output, "csv result"); err != nil {
+				t.Fatalf("write fixture result: %v", err)
+			}
+
 			return fakeMate{
 				onClose: func() {
 					got, err := svc.Get(context.Background(), job.ID)
@@ -146,6 +150,48 @@ func TestScrapeJobMarksOKBeforeClosingMate(t *testing.T) {
 
 	if err := w.scrapeJob(context.Background(), &job); err != nil {
 		t.Fatalf("scrape job: %v", err)
+	}
+}
+
+func TestScrapeJobMarksEmptyOutputFailed(t *testing.T) {
+	t.Parallel()
+
+	repo := &memoryJobRepo{}
+	svc := web.NewService(repo, t.TempDir())
+	job := web.Job{
+		ID:     "empty-job",
+		Name:   "coffee",
+		Date:   time.Now().UTC(),
+		Status: web.StatusPending,
+		Data: web.JobData{
+			Keywords: []string{"coffee"},
+			Lang:     "en",
+			Zoom:     15,
+			FastMode: true,
+			Lat:      "37.7749",
+			Lon:      "-122.4194",
+			Radius:   1000,
+			Depth:    10,
+			MaxTime:  time.Minute,
+		},
+	}
+	if err := svc.Create(context.Background(), &job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	w := &webrunner{
+		svc: svc,
+		cfg: &runner.Config{DataFolder: t.TempDir(), Concurrency: 1},
+		setupMate: func(context.Context, io.Writer, *web.Job) (mateRunner, error) {
+			return fakeMate{}, nil
+		},
+	}
+
+	if err := w.scrapeJob(context.Background(), &job); err == nil {
+		t.Fatal("scrapeJob() succeeded with empty output")
+	}
+	if job.Status != web.StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, web.StatusFailed)
 	}
 }
 

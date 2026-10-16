@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
-  title: Google Maps Scraper API
+  title: Central de Leads API
   version: 1.0.0
-  description: API for managing job google maps scraping tasks
+  description: API local para criar e consultar pesquisas e leads.
+
+servers:
+  - url: /
+    description: Mesmo servidor da documentação
 
 paths:
   /api/v1/jobs:
@@ -64,6 +68,40 @@ paths:
                   $ref: '#/components/schemas/Job'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/leads:
+    get:
+      summary: Listar leads consolidados
+      description: Retorna leads globais paginados, deduplicados por identificador do lugar. Usa os resultados CSV e pesquisas SQLite no modo local, ou a fonte PostgreSQL no modo database.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Página de leads
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalLeadsPage'
+        '500':
+          description: Falha ao consultar a fonte de dados configurada
           content:
             application/json:
               schema:
@@ -159,6 +197,60 @@ paths:
 
 components:
   schemas:
+    GlobalLeadsPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Place'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    Place:
+      type: object
+      properties:
+        place_id:
+          type: string
+        title:
+          type: string
+        address:
+          type: string
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        link:
+          type: string
+          format: uri
+        category:
+          type: string
+        phone:
+          type: string
+        website:
+          type: string
+          format: uri
+        review_rating:
+          type: number
+          format: double
+        review_count:
+          type: integer
+        emails:
+          type: array
+          items:
+            type: string
+            format: email
+        job_id:
+          type: string
+        job_name:
+          type: string
+
     ApiError:
       type: object
       properties:

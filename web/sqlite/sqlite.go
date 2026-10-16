@@ -16,6 +16,10 @@ type repo struct {
 	db *sql.DB
 }
 
+func (repo *repo) Close() error {
+	return repo.db.Close()
+}
+
 func New(path string) (web.JobRepository, error) {
 	db, err := initDatabase(path)
 	if err != nil {

@@ -32,6 +32,7 @@ type webrunner struct {
 	setupMate        func(context.Context, io.Writer, *web.Job) (mateRunner, error)
 	shadowWriter     *shadow.Writer
 	globalLeadsCache io.Closer
+	jobStore         io.Closer
 }
 
 type mateRunner interface {
@@ -128,6 +129,7 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	repoCloser, _ := repo.(io.Closer)
 
 	var shadowWriter *shadow.Writer
 	if rawWriter := shadow.NewWriterFromEnv(); rawWriter != nil {
@@ -154,6 +156,9 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 
 	srv, err := web.New(svc, cfg.Addr)
 	if err != nil {
+		if repoCloser != nil {
+			_ = repoCloser.Close()
+		}
 		if shadowWriter != nil {
 			_ = shadowWriter.Close()
 		}
@@ -170,6 +175,7 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 		setupMate:        defaultSetupMate(cfg, shadowWriter),
 		shadowWriter:     shadowWriter,
 		globalLeadsCache: globalLeadsCache,
+		jobStore:         repoCloser,
 	}
 
 	return &ans, nil
@@ -196,6 +202,11 @@ func (w *webrunner) Close(context.Context) error {
 	}
 	if w.globalLeadsCache != nil {
 		if err := w.globalLeadsCache.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	if w.jobStore != nil {
+		if err := w.jobStore.Close(); closeErr == nil {
 			closeErr = err
 		}
 	}
@@ -259,10 +270,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	if readMode == "database" {
 		if shadowWriter := w.shadowWriter; shadowWriter != nil {
 			query := strings.Join(job.Data.Keywords, ", ")
-			var coords string
-			if job.Data.Lat != "" && job.Data.Lon != "" {
-				coords = job.Data.Lat + "," + job.Data.Lon
-			}
+			coords := job.Data.GeoCoordinates()
 
 			if cachedSearch, err := shadowWriter.FindCompletedSearch(ctx, query, coords); err == nil && cachedSearch != nil {
 				leads, fetchErr := shadowWriter.FetchLeadsForSearch(ctx, cachedSearch.SearchID, job.Data.Depth)
@@ -349,10 +357,7 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 
 	defer mate.Close()
 
-	var coords string
-	if job.Data.Lat != "" && job.Data.Lon != "" {
-		coords = job.Data.Lat + "," + job.Data.Lon
-	}
+	coords := job.Data.GeoCoordinates()
 
 	dedup := deduper.New()
 	exitMonitor := exiter.New()
@@ -429,6 +434,26 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		cancel()
 	}
 
+	info, err := outfile.Stat()
+	if err != nil {
+		job.Status = web.StatusFailed
+		_ = w.svc.Update(ctx, job)
+		return fmt.Errorf("inspect scraper output: %w", err)
+	}
+	if info.Size() == 0 {
+		const noResultsMessage = "scraper completed without writing any results"
+		job.Status = web.StatusFailed
+		if err := w.svc.Update(ctx, job); err != nil {
+			return fmt.Errorf("mark empty scrape as failed: %w", err)
+		}
+		if shadowWriter := w.shadowWriter; shadowWriter != nil {
+			if err := shadowWriter.UpdateSearchStatus(ctx, job.ID, "failed", noResultsMessage); err != nil {
+				log.Printf("provenance status update failed after empty scrape: operation=update_search_status search_id=%s", job.ID)
+			}
+		}
+		return errors.New(noResultsMessage)
+	}
+
 	job.Status = web.StatusOK
 	if shadowWriter := w.shadowWriter; shadowWriter != nil {
 		if statusErr := shadowWriter.UpdateSearchStatus(ctx, job.ID, "completed", ""); statusErr != nil {
@@ -485,10 +510,7 @@ func defaultSetupMate(cfg *runner.Config, shadowWriter *shadow.Writer) func(cont
 		writers := []scrapemate.ResultWriter{csvWriter}
 		if shadowWriter != nil {
 			shadowWriter.SetJobContext(job.ID, job.Name)
-			var coords string
-			if job.Data.Lat != "" && job.Data.Lon != "" {
-				coords = job.Data.Lat + "," + job.Data.Lon
-			}
+			coords := job.Data.GeoCoordinates()
 			if err := shadowWriter.RegisterSearch(ctx, &shadow.SearchContext{
 				SearchID:       job.ID,
 				JobID:          job.ID,

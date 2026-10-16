@@ -82,7 +82,7 @@ func New(svc *Service, addr string) (*Server, error) {
 	mux.HandleFunc("/", ans.index)
 
 	// api routes
-	mux.HandleFunc("/api/docs", ans.redocHandler)
+	mux.HandleFunc("/api/docs", ans.scalarHandler)
 	mux.HandleFunc("/api/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -154,7 +154,7 @@ func New(svc *Service, addr string) (*Server, error) {
 		"static/templates/job_rows.html",
 		"static/templates/job_row.html",
 		"static/templates/job_view.html",
-		"static/templates/redoc.html",
+		"static/templates/scalar.html",
 	}
 
 	for _, key := range tmplsKeys {
@@ -267,8 +267,8 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		Zoom:     15,
 		FastMode: false,
 		Radius:   10000,
-		Lat:      "0",
-		Lon:      "0",
+		Lat:      "",
+		Lon:      "",
 		Depth:    10,
 		Email:    false,
 	}
@@ -519,8 +519,10 @@ type apiScrapeResponse struct {
 	ID string `json:"id"`
 }
 
-func (s *Server) redocHandler(w http.ResponseWriter, _ *http.Request) {
-	tmpl, ok := s.tmpl["static/templates/redoc.html"]
+func (s *Server) scalarHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	tmpl, ok := s.tmpl["static/templates/scalar.html"]
 	if !ok {
 		http.Error(w, "missing tpl", http.StatusInternalServerError)
 
@@ -747,11 +749,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self' cdn.redoc.ly cdnjs.cloudflare.com 'unsafe-inline' 'unsafe-eval'; "+
+				"script-src 'self' cdn.jsdelivr.net cdnjs.cloudflare.com 'unsafe-inline'; "+
 				"worker-src 'self' blob:; "+
-				"style-src 'self' 'unsafe-inline' fonts.googleapis.com cdnjs.cloudflare.com; "+
-				"img-src 'self' data: cdn.redoc.ly cdnjs.cloudflare.com *.tile.openstreetmap.org; "+
-				"font-src 'self' fonts.gstatic.com; "+
+				"style-src 'self' 'unsafe-inline' fonts.googleapis.com cdn.jsdelivr.net cdnjs.cloudflare.com; "+
+				"img-src 'self' data: cdn.jsdelivr.net cdnjs.cloudflare.com *.tile.openstreetmap.org; "+
+				"font-src 'self' fonts.gstatic.com cdn.jsdelivr.net; "+
 				"connect-src 'self'")
 
 		next.ServeHTTP(w, r)

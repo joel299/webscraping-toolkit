@@ -1,5 +1,7 @@
 module github.com/gosom/google-maps-scraper
 
+replace github.com/gosom/scrapemate => ./third_party/scrapemate
+
 go 1.27.1
 
 require (

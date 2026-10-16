@@ -124,7 +124,7 @@ func globalLeadsCacheKey(limit, offset int) string {
 
 func (s *Service) ListGlobalLeads(ctx context.Context, limit, offset int) (GlobalLeadsPage, error) {
 	if !databaseReadMode() {
-		return GlobalLeadsPage{}, fmt.Errorf("global leads database read mode is unavailable")
+		return s.listLocalGlobalLeads(ctx, limit, offset)
 	}
 	if s.database == nil {
 		return GlobalLeadsPage{}, fmt.Errorf("database read mode is unavailable")
@@ -175,6 +175,73 @@ func (s *Service) ListGlobalLeads(ctx context.Context, limit, offset int) (Globa
 		s.globalLeadsCacheMu.Unlock()
 	}
 	return page, nil
+}
+
+func (s *Service) listLocalGlobalLeads(ctx context.Context, limit, offset int) (GlobalLeadsPage, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		return GlobalLeadsPage{}, fmt.Errorf("invalid offset")
+	}
+
+	jobs, err := s.repo.Select(ctx, SelectParams{})
+	if err != nil {
+		return GlobalLeadsPage{}, fmt.Errorf("list local searches: %w", err)
+	}
+
+	items := make([]Place, 0)
+	seen := make(map[string]struct{})
+	for _, job := range jobs {
+		if job.Status != StatusOK {
+			continue
+		}
+
+		places, err := s.GetPlaces(ctx, job.ID)
+		if errors.Is(err, ErrPlacesNotFound) {
+			continue
+		}
+		if err != nil {
+			return GlobalLeadsPage{}, fmt.Errorf("read local results for search %s: %w", job.ID, err)
+		}
+
+		for _, place := range places {
+			key := localPlaceKey(place)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			place.JobID = job.ID
+			place.JobName = job.Name
+			items = append(items, place)
+		}
+	}
+
+	total := len(items)
+	if offset >= total {
+		items = []Place{}
+	} else {
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		items = items[offset:end]
+	}
+
+	return GlobalLeadsPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+func localPlaceKey(place Place) string {
+	if place.PlaceID != "" {
+		return "id:" + strings.ToLower(strings.TrimSpace(place.PlaceID))
+	}
+	if place.Link != "" {
+		return "link:" + strings.ToLower(strings.TrimSpace(place.Link))
+	}
+	return "name:" + strings.ToLower(strings.TrimSpace(place.Title)) + "|address:" + strings.ToLower(strings.TrimSpace(place.Address))
 }
 
 // SetGlobalLeadsCache enables the injectable cache used by the global leads read path.
