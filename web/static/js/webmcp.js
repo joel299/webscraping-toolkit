@@ -27,7 +27,15 @@
         body: JSON.stringify({email, password}),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.message || `HTTP ${response.status}`);
+      if (!response.ok) {
+        if (path === '/api/v1/auth/login' && response.status === 401) {
+          throw new Error('Não foi possível entrar. Entrar só funciona depois de criar a conta inicial. No primeiro acesso, clique em “Criar conta inicial”.');
+        }
+        if (path === '/api/v1/auth/setup' && response.status === 409) {
+          throw new Error('A conta inicial já foi criada. Use “Entrar” com o e-mail e a senha cadastrados.');
+        }
+        throw new Error(result.message || `HTTP ${response.status}`);
+      }
       sessionStorage.setItem(tokenKey, result.access_token);
       passwordInput.value = '';
       window.dispatchEvent(new CustomEvent('central-leads-authenticated', {detail: {token: result.access_token}}));
