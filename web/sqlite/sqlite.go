@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // sqlite driver
 
 	"github.com/gosom/google-maps-scraper/web"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type repo struct {
@@ -277,7 +280,51 @@ func createSchema(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id
 			ON jobs (created_at DESC, id DESC);
+
+		CREATE TABLE IF NOT EXISTS api_credentials (
+			email TEXT PRIMARY KEY COLLATE NOCASE,
+			password_hash TEXT NOT NULL,
+			created_at INT NOT NULL
+		);
 	`)
 
 	return err
+}
+
+// CreateFirstCredential bootstraps the first API identity exactly once.
+func (repo *repo) CreateFirstCredential(ctx context.Context, email, password string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || len(password) < 12 {
+		return fmt.Errorf("email and a password of at least 12 characters are required")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_credentials`).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return web.ErrCredentialAlreadyInitialized
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO api_credentials (email, password_hash, created_at) VALUES (?, ?, ?)`, email, string(hash), time.Now().UTC().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PasswordHash returns the saved bcrypt hash for an email address.
+func (repo *repo) PasswordHash(ctx context.Context, email string) (string, error) {
+	var hash string
+	err := repo.db.QueryRowContext(ctx, `SELECT password_hash FROM api_credentials WHERE email = ?`, strings.ToLower(strings.TrimSpace(email))).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", web.ErrCredentialNotFound
+	}
+	return hash, err
 }

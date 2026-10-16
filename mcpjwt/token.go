@@ -1,4 +1,4 @@
-// Package mcpjwt issues and verifies short-lived bearer tokens for the MCP API.
+// Package mcpjwt issues and verifies bearer tokens for the API and MCP server.
 package mcpjwt
 
 import (
@@ -62,7 +62,7 @@ func decodeSecret(value string) ([]byte, error) {
 	return []byte(value), nil
 }
 
-// Generate signs a short-lived JWT. Supported scopes are read, write, delete,
+// Generate signs a JWT. Supported scopes are read, write, delete,
 // and token:issue (administrator permission to mint scoped access tokens).
 func Generate(secret []byte, subject string, scopes []string, ttl time.Duration, now time.Time) (string, error) {
 	if len(secret) < minimumBytes {

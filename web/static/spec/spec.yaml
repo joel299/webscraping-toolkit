@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Central de Leads API
   version: 1.0.0
-  description: API local para criar e consultar pesquisas e leads. Configure MCP_JWT_SECRET_FILE para exigir JWT nos endpoints REST e conectar agentes em /mcp.
+  description: API para pesquisas e leads. A conta inicial é criada uma única vez em /api/v1/auth/setup; depois, use /api/v1/auth/login. As senhas ficam armazenadas como hashes no backend SQLite. O token de acesso expira em 30 dias.
 
 servers:
   - url: /
@@ -12,10 +12,69 @@ security:
   - BearerAuth: []
 
 paths:
+  /api/v1/auth/setup:
+    post:
+      security: []
+      summary: Create the first API account
+      description: One-time bootstrap endpoint. Available only while no API account exists. Saves the email and a bcrypt password hash in the backend SQLite database and returns a 30-day bearer token.
+      operationId: setupApiAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialsRequest'
+            example:
+              email: joel.quintana@iainfinito.com.br
+              password: replace-with-your-own-strong-password
+      responses:
+        '200':
+          description: Account created; bearer token returned once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountTokenResponse'
+        '400':
+          description: Invalid JSON request.
+        '409':
+          description: Initial account was already created.
+        '422':
+          description: Invalid email or password.
+        '503':
+          description: Persistent account storage or JWT authentication is unavailable.
+  /api/v1/auth/login:
+    post:
+      security: []
+      summary: Sign in and create a 30-day access token
+      operationId: loginApiAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialsRequest'
+            example:
+              email: joel.quintana@iainfinito.com.br
+              password: your-account-password
+      responses:
+        '200':
+          description: Credentials accepted; bearer token returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountTokenResponse'
+        '400':
+          description: Invalid JSON request.
+        '401':
+          description: Email or password is incorrect.
+        '422':
+          description: Invalid email or password format.
+        '503':
+          description: Persistent account storage is unavailable.
   /api/v1/tokens:
     post:
       summary: Generate a scoped API and MCP access token
-      description: Issues a short-lived bearer JWT. Requires an existing administrator JWT with the `token:issue` scope. The returned token is shown once; store it securely. Allowed scopes are `read`, `write`, `delete`, and `token:issue`.
+      description: Issues a bearer JWT for up to 30 days. Requires an existing account JWT with the `token:issue` scope. The returned token is shown once; store it securely. Allowed scopes are `read`, `write`, `delete`, and `token:issue`.
       operationId: createAccessToken
       requestBody:
         required: true
@@ -26,7 +85,7 @@ paths:
             example:
               subject: stark-agent
               scopes: [read, write]
-              ttl: 24h
+              ttl: 720h
       responses:
         '201':
           description: Token created. The access token is returned only in this response.
@@ -360,8 +419,43 @@ components:
             enum: [read, write, delete, token:issue]
         ttl:
           type: string
-          default: 24h
-          description: Go duration from 1 second up to 720 hours, for example 30m or 24h.
+          default: 720h
+          description: Go duration from 1 second up to 720 hours (30 days), for example 30m or 720h.
+    CredentialsRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: joel.quintana@iainfinito.com.br
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 72
+          description: Chosen by the user; stored only as a bcrypt hash.
+    AccountTokenResponse:
+      type: object
+      required: [access_token, token_type, subject, scopes, expires_at]
+      properties:
+        access_token:
+          type: string
+          format: password
+          description: Bearer JWT, returned once and valid for 30 days.
+        token_type:
+          type: string
+          enum: [Bearer]
+        subject:
+          type: string
+          format: email
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
     CreateTokenResponse:
       type: object
       required: [access_token, token_type, subject, scopes, expires_at]

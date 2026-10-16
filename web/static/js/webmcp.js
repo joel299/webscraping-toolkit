@@ -1,23 +1,43 @@
 (() => {
   const tokenKey = 'central-leads-jwt';
   const status = document.getElementById('webmcp-status');
-  const tokenForm = document.getElementById('webmcp-token-form');
-  const tokenInput = document.getElementById('webmcp-token');
+  const authForm = document.getElementById('api-auth-form');
+  const authSetup = document.getElementById('api-auth-setup');
+  const authStatus = document.getElementById('api-auth-status');
+  const emailInput = document.getElementById('api-email');
+  const passwordInput = document.getElementById('api-password');
   const token = () => sessionStorage.getItem(tokenKey) || '';
 
-  if (tokenInput) tokenInput.value = '';
-  tokenForm?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    const value = tokenInput?.value.trim() || '';
-    if (!value) {
-      sessionStorage.removeItem(tokenKey);
-      if (status) status.textContent = 'Token removido desta sessão.';
+  const authenticate = async (path) => {
+    const email = emailInput?.value.trim() || '';
+    const password = passwordInput?.value || '';
+    if (!email || password.length < 12) {
+      if (authStatus) authStatus.textContent = 'Informe um e-mail válido e uma senha com pelo menos 12 caracteres.';
       return;
     }
-    sessionStorage.setItem(tokenKey, value);
-    tokenInput.value = '';
-    if (status) status.textContent = 'Token guardado apenas nesta sessão do navegador.';
+    if (authStatus) authStatus.textContent = 'Conectando…';
+    try {
+      const response = await fetch(path, {
+        method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json'},
+        body: JSON.stringify({email, password}),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || `HTTP ${response.status}`);
+      sessionStorage.setItem(tokenKey, result.access_token);
+      passwordInput.value = '';
+      window.dispatchEvent(new CustomEvent('central-leads-authenticated', {detail: {token: result.access_token}}));
+      if (authStatus) authStatus.textContent = `Sessão iniciada para ${result.subject}; token válido até ${new Date(result.expires_at).toLocaleString()}.`;
+      if (status) status.textContent = 'JWT salvo somente nesta sessão do navegador; WebMCP pronto.';
+    } catch (error) {
+      if (authStatus) authStatus.textContent = error.message;
+    }
+  };
+
+  authForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void authenticate('/api/v1/auth/login');
   });
+  authSetup?.addEventListener('click', () => void authenticate('/api/v1/auth/setup'));
 
   const request = async (path, options = {}) => {
     const headers = new Headers(options.headers || {});
@@ -91,6 +111,6 @@
   }
 
   Promise.all(tools.map((tool) => document.modelContext.registerTool(tool)))
-    .then(() => { if (status) status.textContent = `WebMCP ativo: ${tools.length} ferramentas registradas. Configure um JWT para chamar a API.`; })
+    .then(() => { if (status) status.textContent = `WebMCP ativo: ${tools.length} ferramentas registradas. Entre acima para habilitar as chamadas autenticadas.`; })
     .catch((error) => { if (status) status.textContent = `WebMCP não pôde registrar as ferramentas: ${error.message}`; });
 })();

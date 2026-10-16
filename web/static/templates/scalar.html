@@ -6,24 +6,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
   </head>
   <body>
-    <section aria-label="Autenticação e WebMCP" style="font:14px system-ui,sans-serif;padding:12px 18px;border-bottom:1px solid #ddd;background:#f8fafc;color:#334155">
-      <form id="webmcp-token-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <label for="webmcp-token">Token JWT da sessão:</label>
-        <input id="webmcp-token" type="password" autocomplete="off" placeholder="Cole o token gerado no terminal" style="min-width:280px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
-        <button type="submit" style="padding:7px 12px;border:1px solid #94a3b8;border-radius:6px;background:white;cursor:pointer">Salvar / remover</button>
-        <span id="webmcp-status" role="status" aria-live="polite">Carregando ferramentas WebMCP…</span>
+    <section aria-label="Acesso à API" style="font:14px system-ui,sans-serif;padding:12px 18px;border-bottom:1px solid #ddd;background:#f8fafc;color:#334155">
+      <form id="api-auth-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label for="api-email">E-mail:</label>
+        <input id="api-email" type="email" autocomplete="username" placeholder="joel.quintana@iainfinito.com.br" required style="min-width:250px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
+        <label for="api-password">Senha:</label>
+        <input id="api-password" type="password" autocomplete="current-password" minlength="12" maxlength="72" required aria-label="Senha (12 a 72 bytes)" style="min-width:200px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
+        <button type="button" id="api-auth-setup" style="padding:7px 12px;border:1px solid #94a3b8;border-radius:6px;background:white;cursor:pointer">Criar conta inicial</button>
+        <button type="submit" style="padding:7px 12px;border:1px solid #2563eb;border-radius:6px;background:#2563eb;color:white;cursor:pointer">Entrar</button>
+        <span id="api-auth-status" role="status" aria-live="polite">A conta inicial só pode ser criada uma vez.</span>
       </form>
+      <div id="webmcp-status" role="status" aria-live="polite" style="margin-top:6px">Carregando ferramentas WebMCP…</div>
     </section>
-    <div id="api-reference"></div>
+    <div id="scalar-root"></div>
     <script src="/static/js/webmcp.js"></script>
     <script src="/static/vendor/scalar-api-reference-1.69.2.js"></script>
     <script>
-      Scalar.createApiReference('#api-reference', {
+      const scalarConfig = {
         url: '/static/spec/spec.yaml',
         pageTitle: 'Central de Leads API',
         layout: 'classic',
         withDefaultFonts: false,
-      });
+      };
+      const makeApiReference = (token) => {
+        if (window.centralLeadsApiReference) window.centralLeadsApiReference.destroy();
+        const authentication = token ? { preferredSecurityScheme: 'BearerAuth', securitySchemes: { BearerAuth: { token } } } : undefined;
+        window.centralLeadsApiReference = Scalar.createApiReference('#scalar-root', { ...scalarConfig, authentication });
+      };
+      makeApiReference(sessionStorage.getItem('central-leads-jwt') || '');
+      window.addEventListener('central-leads-authenticated', (event) => makeApiReference(event.detail.token));
     </script>
   </body>
 </html>

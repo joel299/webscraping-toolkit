@@ -100,6 +100,8 @@ func New(svc *Service, addr string) (*Server, error) {
 
 	// api routes
 	mux.HandleFunc("/api/docs", ans.scalarHandler)
+	mux.HandleFunc("/api/v1/auth/setup", ans.apiSetupCredential)
+	mux.HandleFunc("/api/v1/auth/login", ans.apiLogin)
 	mux.Handle("/api/v1/tokens", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)

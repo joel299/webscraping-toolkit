@@ -11,6 +11,7 @@ import (
 
 type Service struct {
 	repo                 JobRepository
+	credentials          CredentialStore
 	dataFolder           string
 	database             DatabaseReader
 	globalLeadsCache     GlobalLeadsCache
@@ -18,6 +19,9 @@ type Service struct {
 	globalLeadsCacheMu   sync.Mutex
 	globalLeadsCacheKeys map[string]struct{}
 }
+
+// SetCredentialStore configures persistent API account authentication.
+func (s *Service) SetCredentialStore(store CredentialStore) { s.credentials = store }
 
 type jobCounter interface {
 	Count(context.Context, SelectParams) (int, error)

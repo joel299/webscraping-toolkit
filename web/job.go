@@ -10,7 +10,11 @@ import (
 
 var jobs []Job
 
-var ErrNoJobAvailable = errors.New("no job available")
+var (
+	ErrNoJobAvailable               = errors.New("no job available")
+	ErrCredentialAlreadyInitialized = errors.New("API account is already initialized")
+	ErrCredentialNotFound           = errors.New("API account not found")
+)
 
 const (
 	StatusPending = "pending"
@@ -44,6 +48,13 @@ type JobRepository interface {
 	Delete(context.Context, string) error
 	Select(context.Context, SelectParams) ([]Job, error)
 	Update(context.Context, *Job) error
+}
+
+// CredentialStore persists API account password hashes in the backend store.
+// Implementations must never retain the plaintext password.
+type CredentialStore interface {
+	CreateFirstCredential(context.Context, string, string) error
+	PasswordHash(context.Context, string) (string, error)
 }
 
 // DatabaseReader provides the read-only database-first view of persisted

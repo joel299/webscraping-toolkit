@@ -137,6 +137,9 @@ func New(cfg *runner.Config) (runner.Runner, error) {
 	}
 
 	svc := web.NewService(repo, cfg.DataFolder)
+	if credentialStore, ok := repo.(web.CredentialStore); ok {
+		svc.SetCredentialStore(credentialStore)
+	}
 	var globalLeadsCache io.Closer
 	if cacheEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("PROSPECT_CACHE_ENABLED")), "true") || os.Getenv("PROSPECT_CACHE_ENABLED") == "1"; cacheEnabled {
 		redisCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

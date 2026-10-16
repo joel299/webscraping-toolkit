@@ -34,7 +34,7 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(input.TTL) == "" {
-		input.TTL = "24h"
+		input.TTL = "720h"
 	}
 	ttl, err := time.ParseDuration(input.TTL)
 	if err != nil {
