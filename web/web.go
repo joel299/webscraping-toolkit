@@ -18,6 +18,9 @@ import (
 	"strings"
 	"time"
 	"uuid"
+
+	"github.com/gosom/google-maps-scraper/mcpjwt"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 )
 
 //go:embed static
@@ -29,9 +32,10 @@ const (
 )
 
 type Server struct {
-	tmpl map[string]*template.Template
-	srv  *http.Server
-	svc  *Service
+	tmpl        map[string]*template.Template
+	srv         *http.Server
+	svc         *Service
+	authEnabled bool
 }
 
 // Handler returns the configured HTTP handler for embedding and integration tests.
@@ -56,6 +60,17 @@ func New(svc *Service, addr string) (*Server, error) {
 	staticFS, err := fs.Sub(static, "static")
 	if err != nil {
 		return nil, err
+	}
+	jwtSecret, err := mcpjwt.LoadSecret()
+	if err != nil {
+		return nil, err
+	}
+	ans.authEnabled = len(jwtSecret) > 0
+	apiAuth := func(next http.Handler) http.Handler {
+		if len(jwtSecret) == 0 {
+			return next
+		}
+		return auth.RequireBearerToken(mcpjwt.Verifier(jwtSecret), &auth.RequireBearerTokenOptions{})(next)
 	}
 
 	fileServer := http.FileServer(http.FS(staticFS))
@@ -83,11 +98,17 @@ func New(svc *Service, addr string) (*Server, error) {
 
 	// api routes
 	mux.HandleFunc("/api/docs", ans.scalarHandler)
-	mux.HandleFunc("/api/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/jobs", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
+			if !ans.requireAPIScope(w, r, "write") {
+				return
+			}
 			ans.apiScrape(w, r)
 		case http.MethodGet:
+			if !ans.requireAPIScope(w, r, "read") {
+				return
+			}
 			ans.apiGetJobs(w, r)
 		default:
 			ans := apiError{
@@ -97,10 +118,13 @@ func New(svc *Service, addr string) (*Server, error) {
 
 			renderJSON(w, http.StatusMethodNotAllowed, ans)
 		}
-	})
-	mux.HandleFunc("/api/v1/leads", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/v1/leads", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: methodNotAllowedMessage})
+			return
+		}
+		if !ans.requireAPIScope(w, r, "read") {
 			return
 		}
 		page, err := ans.apiGlobalLeads(r)
@@ -109,15 +133,21 @@ func New(svc *Service, addr string) (*Server, error) {
 			return
 		}
 		renderJSON(w, http.StatusOK, page)
-	})
+	})))
 
-	mux.HandleFunc("/api/v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/jobs/{id}", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = requestWithID(r)
 
 		switch r.Method {
 		case http.MethodGet:
+			if !ans.requireAPIScope(w, r, "read") {
+				return
+			}
 			ans.apiGetJob(w, r)
 		case http.MethodDelete:
+			if !ans.requireAPIScope(w, r, "delete") {
+				return
+			}
 			ans.apiDeleteJob(w, r)
 		default:
 			ans := apiError{
@@ -127,9 +157,9 @@ func New(svc *Service, addr string) (*Server, error) {
 
 			renderJSON(w, http.StatusMethodNotAllowed, ans)
 		}
-	})
+	})))
 
-	mux.HandleFunc("/api/v1/jobs/{id}/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/jobs/{id}/download", apiAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = requestWithID(r)
 
 		if r.Method != http.MethodGet {
@@ -142,9 +172,19 @@ func New(svc *Service, addr string) (*Server, error) {
 
 			return
 		}
+		if !ans.requireAPIScope(w, r, "read") {
+			return
+		}
 
 		ans.download(w, r)
-	})
+	})))
+	if len(jwtSecret) == 0 {
+		mux.HandleFunc("/mcp", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "MCP authentication is not configured. Set MCP_JWT_SECRET_FILE and restart the server.", http.StatusServiceUnavailable)
+		})
+	} else {
+		mux.Handle("/mcp", newMCPHandler(svc, jwtSecret))
+	}
 
 	handler := securityHeaders(mux)
 	ans.srv.Handler = handler
@@ -530,6 +570,14 @@ func (s *Server) scalarHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	_ = tmpl.Execute(w, nil)
+}
+
+func (s *Server) requireAPIScope(w http.ResponseWriter, r *http.Request, scope string) bool {
+	if !s.authEnabled || mcpjwt.HasScope(auth.TokenInfoFromContext(r.Context()), scope) {
+		return true
+	}
+	renderJSON(w, http.StatusForbidden, apiError{Code: http.StatusForbidden, Message: "token scope is insufficient"})
+	return false
 }
 
 func (s *Server) apiScrape(w http.ResponseWriter, r *http.Request) {

@@ -2,11 +2,14 @@ openapi: 3.0.3
 info:
   title: Central de Leads API
   version: 1.0.0
-  description: API local para criar e consultar pesquisas e leads.
+  description: API local para criar e consultar pesquisas e leads. Configure MCP_JWT_SECRET_FILE para exigir JWT nos endpoints REST e conectar agentes em /mcp.
 
 servers:
   - url: /
     description: Mesmo servidor da documentação
+
+security:
+  - BearerAuth: []
 
 paths:
   /api/v1/jobs:
@@ -196,6 +199,11 @@ paths:
           description: Internal server error
 
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   schemas:
     GlobalLeadsPage:
       type: object

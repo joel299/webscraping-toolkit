@@ -6,7 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
   </head>
   <body>
+    <section aria-label="Autenticação e WebMCP" style="font:14px system-ui,sans-serif;padding:12px 18px;border-bottom:1px solid #ddd;background:#f8fafc;color:#334155">
+      <form id="webmcp-token-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label for="webmcp-token">Token JWT da sessão:</label>
+        <input id="webmcp-token" type="password" autocomplete="off" placeholder="Cole o token gerado no terminal" style="min-width:280px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px" />
+        <button type="submit" style="padding:7px 12px;border:1px solid #94a3b8;border-radius:6px;background:white;cursor:pointer">Salvar / remover</button>
+        <span id="webmcp-status" role="status" aria-live="polite">Carregando ferramentas WebMCP…</span>
+      </form>
+    </section>
     <div id="api-reference"></div>
+    <script src="/static/js/webmcp.js"></script>
     <script src="/static/vendor/scalar-api-reference-1.69.2.js"></script>
     <script>
       Scalar.createApiReference('#api-reference', {

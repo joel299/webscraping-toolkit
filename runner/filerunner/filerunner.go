@@ -3,10 +3,12 @@ package filerunner
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gosom/google-maps-scraper/deduper"
@@ -33,6 +35,8 @@ type fileRunner struct {
 	resumeDedup    *resume.IdentitySet
 	resumeState    *resume.State
 	resumeProgress *resume.ProgressTracker
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func New(cfg *runner.Config) (runner.Runner, error) {
@@ -173,21 +177,31 @@ func (r *fileRunner) Run(ctx context.Context) (err error) {
 }
 
 func (r *fileRunner) Close(context.Context) error {
-	if r.app != nil {
-		return r.app.Close()
-	}
-
-	if r.input != nil {
-		if closer, ok := r.input.(io.Closer); ok {
-			return closer.Close()
+	r.closeOnce.Do(func() {
+		var closeErrors []error
+		if r.app != nil {
+			if err := r.app.Close(); err != nil {
+				closeErrors = append(closeErrors, fmt.Errorf("close scraper app: %w", err))
+			}
 		}
-	}
-
-	if r.outfile != nil {
-		return r.outfile.Close()
-	}
-
-	return nil
+		if r.input != nil && r.input != os.Stdin {
+			if closer, ok := r.input.(io.Closer); ok {
+				if err := closer.Close(); err != nil {
+					closeErrors = append(closeErrors, fmt.Errorf("close input: %w", err))
+				}
+			}
+		}
+		// Close the underlying result file even when it was also owned by a writer.
+		if r.outfile != nil {
+			if err := r.outfile.Close(); err != nil {
+				if !errors.Is(err, os.ErrClosed) {
+					closeErrors = append(closeErrors, fmt.Errorf("close results file: %w", err))
+				}
+			}
+		}
+		r.closeErr = errors.Join(closeErrors...)
+	})
+	return r.closeErr
 }
 
 func (r *fileRunner) seedJobOptions() []runner.SeedJobOption {

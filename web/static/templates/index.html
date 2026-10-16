@@ -31,7 +31,7 @@
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                     <span>Leads</span>
                 </div>
-                <a href="/api/docs" target="_blank" rel="noopener noreferrer" class="nav-item" id="nav-docs" title="Integrações / API">
+                <a href="/api/docs" class="nav-item" id="nav-docs" title="Integrações / API">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                     <span>Integrações</span>
                 </a>
@@ -148,7 +148,7 @@
             <footer id="app-footer">
                 <div>&copy; Central de Leads — Prospecção Comercial</div>
                 <div class="footer-links">
-                    <a href="/api/docs" target="_blank" rel="noopener noreferrer">Documentação da API</a>
+                    <a href="/api/docs">Documentação da API</a>
                 </div>
             </footer>
         </div>
@@ -411,9 +411,14 @@
             if (statusEl) statusEl.textContent = 'Carregando empresas encontradas em todas as pesquisas...';
             
             try {
-                const res = await fetch('/api/v1/leads?limit=500&offset=0');
+                const headers = {};
+                const jwt = sessionStorage.getItem('central-leads-jwt');
+                if (jwt) headers.Authorization = `Bearer ${jwt}`;
+                const res = await fetch('/api/v1/leads?limit=500&offset=0', {headers});
                 if (!res.ok) {
-                    if (statusEl) statusEl.textContent = 'Nenhuma pesquisa encontrada.';
+                    if (statusEl) statusEl.textContent = res.status === 401
+                        ? 'Sessão sem JWT válido. Abra Integrações e configure o token.'
+                        : 'Nenhuma pesquisa encontrada.';
                     updateLeadsBadge(0);
                     renderGlobalLeadsUI([]);
                     return;
@@ -709,5 +714,6 @@
             panelEl.innerHTML = html.join('');
         }
     </script>
+    <script src="/static/js/webmcp.js"></script>
 </body>
 </html>

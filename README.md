@@ -206,6 +206,25 @@ docker run --rm -p 8086:8086 -e PROSPECT_DATABASE_URL_FILE=/run/secrets/prospect
 
 Não versione o arquivo de credenciais.
 
+### MCP autenticado e ferramentas WebMCP
+
+O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. O endpoint MCP e as rotas `/api/v1/*` exigem bearer JWT depois de configurar a chave. A chave fica em arquivo privado no perfil do Windows:
+
+```powershell
+Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
+.\scripts\setup-mcp-auth.ps1
+```
+
+Reinicie o servidor para ativar a autenticação. Gere um token curto (padrão de 24 horas) com:
+
+```powershell
+.\scripts\generate-mcp-token.ps1 -Subject "meu-agente" -Scopes "read,write,delete" -TTL "24h"
+```
+
+O token aparece no terminal; trate-o como senha e não o envie em conversas ou repositórios. As permissões disponíveis são `read`, `write` e `delete`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
+
+Na página **Integrações / API**, cole o token no campo da sessão. Quando o navegador oferece `document.modelContext`, o frontend registra essas mesmas seis operações como ferramentas WebMCP. Navegadores sem essa API ainda podem conectar um cliente MCP em `/mcp`. WebMCP é a API de ferramentas do navegador; `/mcp` é o endpoint MCP remoto do servidor.
+
 ## Execução local
 
 Requisitos principais:

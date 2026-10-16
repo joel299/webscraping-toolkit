@@ -3,6 +3,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,15 @@ func (r *mutableJobRepo) Create(_ context.Context, job *Job) error {
 	r.jobs = append([]Job{*job}, r.jobs...)
 
 	return nil
+}
+
+func (r *mutableJobRepo) Get(_ context.Context, id string) (Job, error) {
+	for _, job := range r.jobs {
+		if job.ID == id {
+			return job, nil
+		}
+	}
+	return Job{}, errors.New("job not found")
 }
 
 func (r *mutableJobRepo) Delete(_ context.Context, id string) error {
@@ -204,7 +214,7 @@ func TestIndexScrapeFormReplacesPaginatedJobs(t *testing.T) {
 		t.Fatal("submit preparation must not depend on the button click handler")
 	}
 
-	if !strings.Contains(body, `fetch('/api/v1/leads?limit=500&offset=0')`) {
+	if !strings.Contains(body, `fetch('/api/v1/leads?limit=500&offset=0', {headers})`) {
 		t.Fatal("global leads must use the aggregated JSON read endpoint")
 	}
 
