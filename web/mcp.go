@@ -38,6 +38,10 @@ type mcpJobData struct {
 	Proxies      []string `json:"proxies,omitempty"`
 }
 
+type listJobsToolOutput struct {
+	Jobs []mcpJob `json:"jobs"`
+}
+
 type createJobToolInput struct {
 	Confirm      bool     `json:"confirm" jsonschema:"Set true to confirm that this search should start"`
 	Name         string   `json:"name" jsonschema:"Search name shown in the dashboard"`
@@ -137,19 +141,19 @@ func registerMCPTools(server *mcp.Server, svc *Service) {
 		return nil, createJobToolOutput{ID: job.ID}, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{Name: "list_jobs", Title: "List search jobs", Description: "Returns all saved search jobs and their status. Requires the read scope.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, []mcpJob, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "list_jobs", Title: "List search jobs", Description: "Returns all saved search jobs and their status in a jobs array. Requires the read scope.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listJobsToolOutput, error) {
 		if err := requireMcpScope(ctx, "read"); err != nil {
-			return nil, nil, err
+			return nil, listJobsToolOutput{}, err
 		}
 		jobs, err := svc.All(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, listJobsToolOutput{}, err
 		}
 		result := make([]mcpJob, 0, len(jobs))
 		for _, job := range jobs {
 			result = append(result, asMCPJob(job))
 		}
-		return nil, result, nil
+		return nil, listJobsToolOutput{Jobs: result}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{Name: "list_leads", Title: "List consolidated leads", Description: "Returns deduplicated leads with pagination. Requires the read scope.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, input listLeadsToolInput) (*mcp.CallToolResult, GlobalLeadsPage, error) {

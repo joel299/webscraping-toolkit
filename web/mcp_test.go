@@ -73,6 +73,29 @@ func TestMCPExposesAndExecutesEveryAPIOperation(t *testing.T) {
 		if _, ok := want[tool.Name]; ok {
 			want[tool.Name] = true
 		}
+		if tool.Name == "list_jobs" {
+			schemaJSON, marshalErr := json.Marshal(tool.OutputSchema)
+			if marshalErr != nil {
+				t.Fatalf("marshal list_jobs output schema: %v", marshalErr)
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+				t.Fatalf("decode list_jobs output schema: %v", err)
+			}
+			properties, _ := schema["properties"].(map[string]any)
+			jobsSchema, _ := properties["jobs"].(map[string]any)
+			jobsTypeHasArray := jobsSchema["type"] == "array"
+			if types, ok := jobsSchema["type"].([]any); ok {
+				for _, value := range types {
+					if value == "array" {
+						jobsTypeHasArray = true
+					}
+				}
+			}
+			if schema["type"] != "object" || !jobsTypeHasArray {
+				t.Errorf("list_jobs output schema = %s, want root object with jobs array", schemaJSON)
+			}
+		}
 	}
 	for name, found := range want {
 		if !found {
@@ -93,6 +116,17 @@ func TestMCPExposesAndExecutesEveryAPIOperation(t *testing.T) {
 	}
 	if result := call("list_jobs", map[string]any{}); result.IsError {
 		t.Fatalf("list_jobs: %s", result.Content)
+	} else {
+		encoded, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatalf("marshal list_jobs result: %v", err)
+		}
+		var output struct {
+			Jobs []mcpJob `json:"jobs"`
+		}
+		if err := json.Unmarshal(encoded, &output); err != nil || output.Jobs == nil || len(output.Jobs) != 1 {
+			t.Fatalf("list_jobs result = %s, want object with one job", encoded)
+		}
 	}
 	leads := call("list_leads", map[string]any{"limit": 10, "offset": 0})
 	if leads.IsError || !strings.Contains(fmt.Sprint(leads.StructuredContent), "Test Pharmacy") {
@@ -237,7 +271,7 @@ func TestOpenAPIDocumentsMCPRoute(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("OpenAPI spec status = %d, want 200", recorder.Code)
 	}
-	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id", "/api/v1/tokens:", "token:issue", "CreateTokenResponse"} {
+	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id", "/api/v1/tokens:", "token:issue", "CreateTokenResponse", "name: Farmácias em Campo Grande, MS", "keywords: [\"farmácias em Campo Grande, MS\"]"} {
 		if !strings.Contains(recorder.Body.String(), expected) {
 			t.Errorf("OpenAPI spec does not document %q", expected)
 		}

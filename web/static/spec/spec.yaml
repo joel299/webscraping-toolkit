@@ -129,6 +129,20 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ApiScrapeRequest'
+            example:
+              name: Farmácias em Campo Grande, MS
+              keywords: ["farmácias em Campo Grande, MS"]
+              lang: pt
+              zoom: 14
+              lat: ""
+              lon: ""
+              fast_mode: false
+              radius: 5
+              depth: 1
+              email: false
+              extra_reviews: false
+              max_time: 300
+              proxies: []
       responses:
         '201':
           description: Job created successfully
@@ -583,35 +597,51 @@ components:
 
     ApiScrapeRequest:
       type: object
+      required: [name, keywords, lang, depth, max_time]
       properties:
         name:
           type: string
+          example: Farmácias em Campo Grande, MS
         keywords:
           type: array
           items:
             type: string
+          example: ["farmácias em Campo Grande, MS"]
         lang:
           type: string
+          example: pt
         zoom:
           type: integer
+          example: 14
         lat:
           type: string
+          example: ""
         lon:
           type: string
+          example: ""
         fast_mode:
           type: boolean
+          example: false
         radius:
           type: integer
+          example: 5
         depth:
           type: integer
+          example: 1
         email:
           type: boolean
+          example: false
+        extra_reviews:
+          type: boolean
+          example: false
         max_time:
           type: integer
+          example: 300
         proxies:
           type: array
           items:
             type: string
+          example: []
 
     ApiScrapeResponse:
       type: object
