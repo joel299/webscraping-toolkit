@@ -11,8 +11,13 @@
   const authenticate = async (path) => {
     const email = emailInput?.value.trim() || '';
     const password = passwordInput?.value || '';
-    if (!email || password.length < 12) {
-      if (authStatus) authStatus.textContent = 'Informe um e-mail válido e uma senha com pelo menos 12 caracteres.';
+    if (!emailInput?.checkValidity()) {
+      if (authStatus) authStatus.textContent = 'Informe um endereço de e-mail válido. A solicitação não foi enviada.';
+      return;
+    }
+    const passwordBytes = new TextEncoder().encode(password).length;
+    if (passwordBytes < 12 || passwordBytes > 72) {
+      if (authStatus) authStatus.textContent = 'A senha precisa ter de 12 a 72 bytes em UTF-8. A solicitação não foi enviada.';
       return;
     }
     if (authStatus) authStatus.textContent = 'Conectando…';

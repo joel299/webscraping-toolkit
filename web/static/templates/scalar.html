@@ -71,13 +71,13 @@
         </div>
         <div class="api-auth-field">
           <label for="api-password">Senha</label>
-          <input id="api-password" type="password" autocomplete="current-password" minlength="12" maxlength="72" required aria-label="Senha (12 a 72 bytes)" />
+          <input id="api-password" type="password" autocomplete="current-password" maxlength="72" required aria-label="Senha (12 a 72 bytes)" />
         </div>
         <div class="api-auth-actions">
           <button type="button" id="api-auth-setup">Criar conta inicial</button>
           <button type="submit">Entrar</button>
         </div>
-        <span id="api-auth-status" role="status" aria-live="polite">A conta inicial só pode ser criada uma vez.</span>
+        <span id="api-auth-status" role="status" aria-live="polite">A conta inicial só pode ser criada uma vez. A senha deve ter de 12 a 72 bytes; se a conta já existe, use Entrar.</span>
       </form>
       <div id="webmcp-status" role="status" aria-live="polite">Carregando ferramentas WebMCP…</div>
     </section>
