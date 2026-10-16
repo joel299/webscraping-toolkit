@@ -25,6 +25,9 @@ type mcpJob struct {
 
 type mcpJobData struct {
 	Keywords     []string `json:"keywords"`
+	Category     string   `json:"category,omitempty"`
+	City         string   `json:"city,omitempty"`
+	State        string   `json:"state,omitempty"`
 	Lang         string   `json:"lang"`
 	Zoom         int      `json:"zoom"`
 	Lat          string   `json:"lat"`
@@ -45,6 +48,9 @@ type listJobsToolOutput struct {
 type createJobToolInput struct {
 	Confirm      bool     `json:"confirm" jsonschema:"Set true to confirm that this search should start"`
 	Name         string   `json:"name" jsonschema:"Search name shown in the dashboard"`
+	Category     string   `json:"category,omitempty" jsonschema:"Business category, for example pharmacy"`
+	City         string   `json:"city,omitempty" jsonschema:"City for the search"`
+	State        string   `json:"state,omitempty" jsonschema:"Two-letter state code, for example MS"`
 	Keywords     []string `json:"keywords" jsonschema:"Search terms to run on Google Maps"`
 	Lang         string   `json:"lang" jsonschema:"Two-letter language code, for example pt"`
 	Zoom         int      `json:"zoom,omitempty"`
@@ -57,10 +63,14 @@ type createJobToolInput struct {
 	ExtraReviews bool     `json:"extra_reviews,omitempty"`
 	MaxTime      int      `json:"max_time" jsonschema:"Maximum run time in seconds"`
 	Proxies      []string `json:"proxies,omitempty"`
+	ForceRefresh bool     `json:"force_refresh,omitempty" jsonschema:"Bypass a recent successful result and start a fresh search"`
 }
 
 type createJobToolOutput struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Reused   bool   `json:"reused"`
+	CacheHit bool   `json:"cache_hit"`
 }
 
 type listLeadsToolInput struct {
@@ -117,7 +127,7 @@ func registerMCPTools(server *mcp.Server, svc *Service) {
 	write := &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPointer(false), Title: "Create search"}
 	destructive := &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPointer(true), Title: "Delete search"}
 
-	mcp.AddTool(server, &mcp.Tool{Name: "create_job", Title: "Create a Google Maps search", Description: "Starts a Google Maps scraping job. Requires the write scope. This may use scraper resources and take time.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, input createJobToolInput) (*mcp.CallToolResult, createJobToolOutput, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "create_job", Title: "Create or reuse a Google Maps search", Description: "Checks for an equivalent pending, running, or successful search from the last 30 days before starting a new scrape. A cache hit returns the existing completed job. Set force_refresh true to bypass a successful cached result. Requires the write scope.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, input createJobToolInput) (*mcp.CallToolResult, createJobToolOutput, error) {
 		if err := requireMcpScope(ctx, "write"); err != nil {
 			return nil, createJobToolOutput{}, err
 		}
@@ -127,7 +137,8 @@ func registerMCPTools(server *mcp.Server, svc *Service) {
 		job := Job{
 			ID: uuid.NewString(), Name: strings.TrimSpace(input.Name), Date: time.Now().UTC(), Status: StatusPending,
 			Data: JobData{
-				Keywords: input.Keywords, Lang: input.Lang, Zoom: input.Zoom, Lat: input.Lat, Lon: input.Lon,
+				Keywords: input.Keywords, Category: input.Category, City: input.City, State: input.State,
+				Lang: input.Lang, Zoom: input.Zoom, Lat: input.Lat, Lon: input.Lon,
 				FastMode: input.FastMode, Radius: input.Radius, Depth: input.Depth, Email: input.Email,
 				ExtraReviews: input.ExtraReviews, MaxTime: time.Duration(input.MaxTime) * time.Second, Proxies: input.Proxies,
 			},
@@ -135,10 +146,11 @@ func registerMCPTools(server *mcp.Server, svc *Service) {
 		if err := job.Validate(); err != nil {
 			return nil, createJobToolOutput{}, err
 		}
-		if err := svc.Create(ctx, &job); err != nil {
+		result, reused, cacheHit, err := svc.CreateOrReuseSearch(ctx, &job, input.ForceRefresh)
+		if err != nil {
 			return nil, createJobToolOutput{}, fmt.Errorf("create search job: %w", err)
 		}
-		return nil, createJobToolOutput{ID: job.ID}, nil
+		return nil, createJobToolOutput{ID: result.ID, Status: result.Status, Reused: reused, CacheHit: cacheHit}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{Name: "list_jobs", Title: "List search jobs", Description: "Returns all saved search jobs and their status in a jobs array. Requires the read scope.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listJobsToolOutput, error) {
@@ -226,7 +238,8 @@ func registerMCPTools(server *mcp.Server, svc *Service) {
 func asMCPJob(job Job) mcpJob {
 	data := job.Data
 	return mcpJob{ID: job.ID, Name: job.Name, Date: job.Date, Status: job.Status, Data: mcpJobData{
-		Keywords: data.Keywords, Lang: data.Lang, Zoom: data.Zoom, Lat: data.Lat, Lon: data.Lon,
+		Keywords: data.Keywords, Category: data.Category, City: data.City, State: data.State,
+		Lang: data.Lang, Zoom: data.Zoom, Lat: data.Lat, Lon: data.Lon,
 		FastMode: data.FastMode, Radius: data.Radius, Depth: data.Depth, Email: data.Email,
 		ExtraReviews: data.ExtraReviews, MaxTime: int64(data.MaxTime / time.Second), Proxies: data.Proxies,
 	}}

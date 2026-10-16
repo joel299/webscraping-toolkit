@@ -109,7 +109,8 @@ paths:
   /api/v1/jobs:
     post:
       summary: Create a new job scraping task
-      description: Cria uma tarefa de pesquisa no Google Maps com as palavras-chave e os parâmetros enviados. A tarefa é enfileirada para processamento; a resposta retorna o identificador para acompanhar o status e consultar os resultados depois.
+      description: >-
+        Antes de enfileirar, procura uma tarefa equivalente em andamento ou concluída nos últimos 30 dias. Em caso de cache hit, devolve a tarefa existente como pronta e não repete a coleta. Use force_refresh para iniciar nova coleta quando não houver outra equivalente em andamento.
       x-code-samples:
         - lang: curl
           source: |
@@ -131,6 +132,9 @@ paths:
               $ref: '#/components/schemas/ApiScrapeRequest'
             example:
               name: Farmácias em Campo Grande, MS
+              category: farmácia
+              city: Campo Grande
+              state: MS
               keywords: ["farmácias em Campo Grande, MS"]
               lang: pt
               zoom: 14
@@ -143,9 +147,16 @@ paths:
               extra_reviews: false
               max_time: 300
               proxies: []
+              force_refresh: false
       responses:
         '201':
-          description: Job created successfully
+          description: New job created and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiScrapeResponse'
+        '200':
+          description: Equivalent job reused from cache or already in progress
           content:
             application/json:
               schema:
@@ -602,6 +613,18 @@ components:
         name:
           type: string
           example: Farmácias em Campo Grande, MS
+        category:
+          type: string
+          description: Categoria normalizada para localizar buscas equivalentes
+          example: farmácia
+        city:
+          type: string
+          description: Cidade pesquisada
+          example: Campo Grande
+        state:
+          type: string
+          description: Sigla do estado
+          example: MS
         keywords:
           type: array
           items:
@@ -642,12 +665,23 @@ components:
           items:
             type: string
           example: []
+        force_refresh:
+          type: boolean
+          description: Ignora resultado concluído dentro do cache e solicita uma atualização
+          default: false
 
     ApiScrapeResponse:
       type: object
       properties:
         id:
           type: string
+        status:
+          type: string
+          enum: [pending, working, ok, failed]
+        reused:
+          type: boolean
+        cache_hit:
+          type: boolean
 
     Job:
       type: object

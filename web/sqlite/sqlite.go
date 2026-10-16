@@ -33,7 +33,7 @@ func New(path string) (web.JobRepository, error) {
 }
 
 func (repo *repo) Get(ctx context.Context, id string) (web.Job, error) {
-	const q = `SELECT * from jobs WHERE id = ?`
+	const q = `SELECT id, name, status, data, created_at, updated_at, cache_key FROM jobs WHERE id = ?`
 
 	row := repo.db.QueryRowContext(ctx, q, id)
 
@@ -46,9 +46,9 @@ func (repo *repo) Create(ctx context.Context, job *web.Job) error {
 		return err
 	}
 
-	const q = `INSERT INTO jobs (id, name, status, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
+	const q = `INSERT INTO jobs (id, name, status, data, created_at, updated_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
-	_, err = repo.db.ExecContext(ctx, q, item.ID, item.Name, item.Status, item.Data, item.CreatedAt, item.UpdatedAt)
+	_, err = repo.db.ExecContext(ctx, q, item.ID, item.Name, item.Status, item.Data, item.CreatedAt, item.UpdatedAt, item.CacheKey)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (repo *repo) Delete(ctx context.Context, id string) error {
 }
 
 func (repo *repo) Select(ctx context.Context, params web.SelectParams) ([]web.Job, error) {
-	q := `SELECT * from jobs`
+	q := `SELECT id, name, status, data, created_at, updated_at, cache_key FROM jobs`
 
 	var args []any
 
@@ -129,7 +129,7 @@ func (repo *repo) ClaimPending(ctx context.Context) (*web.Job, error) {
 			LIMIT 1
 		)
 		AND status = ?
-		RETURNING id, name, status, data, created_at, updated_at`
+		RETURNING id, name, status, data, created_at, updated_at, cache_key`
 
 	row := repo.db.QueryRowContext(ctx, q, web.StatusWorking, time.Now().UTC().Unix(), web.StatusPending, web.StatusPending)
 	job, err := rowToJob(row)
@@ -170,9 +170,9 @@ func (repo *repo) Update(ctx context.Context, job *web.Job) error {
 		return err
 	}
 
-	const q = `UPDATE jobs SET name = ?, status = ?, data = ?, updated_at = ? WHERE id = ?`
+	const q = `UPDATE jobs SET name = ?, status = ?, data = ?, updated_at = ?, cache_key = ? WHERE id = ?`
 
-	_, err = repo.db.ExecContext(ctx, q, item.Name, item.Status, item.Data, item.UpdatedAt, item.ID)
+	_, err = repo.db.ExecContext(ctx, q, item.Name, item.Status, item.Data, item.UpdatedAt, item.CacheKey, item.ID)
 
 	return err
 }
@@ -184,16 +184,17 @@ type scannable interface {
 func rowToJob(row scannable) (web.Job, error) {
 	var j job
 
-	err := row.Scan(&j.ID, &j.Name, &j.Status, &j.Data, &j.CreatedAt, &j.UpdatedAt)
+	err := row.Scan(&j.ID, &j.Name, &j.Status, &j.Data, &j.CreatedAt, &j.UpdatedAt, &j.CacheKey)
 	if err != nil {
 		return web.Job{}, err
 	}
 
 	ans := web.Job{
-		ID:     j.ID,
-		Name:   j.Name,
-		Status: j.Status,
-		Date:   time.Unix(j.CreatedAt, 0).UTC(),
+		ID:       j.ID,
+		Name:     j.Name,
+		Status:   j.Status,
+		Date:     time.Unix(j.CreatedAt, 0).UTC(),
+		CacheKey: j.CacheKey,
 	}
 
 	err = json.Unmarshal([]byte(j.Data), &ans.Data)
@@ -217,6 +218,7 @@ func jobToRow(item *web.Job) (job, error) {
 		Data:      string(data),
 		CreatedAt: item.Date.Unix(),
 		UpdatedAt: time.Now().UTC().Unix(),
+		CacheKey:  item.CacheKey,
 	}, nil
 }
 
@@ -227,6 +229,55 @@ type job struct {
 	Data      string
 	CreatedAt int64
 	UpdatedAt int64
+	CacheKey  string
+}
+
+func (repo *repo) CreateOrReuseSearch(ctx context.Context, candidate *web.Job, key string, now time.Time, ttl time.Duration, forceRefresh bool) (web.Job, bool, bool, error) {
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return web.Job{}, false, false, err
+	}
+	defer tx.Rollback()
+
+	const find = `
+		SELECT id, status, updated_at FROM jobs
+		WHERE cache_key = ? AND status IN (?, ?, ?)
+		ORDER BY CASE WHEN status IN (?, ?) THEN 0 ELSE 1 END, updated_at DESC, id DESC
+		LIMIT 1`
+	var existingID, status string
+	var updatedAt int64
+	err = tx.QueryRowContext(ctx, find, key, web.StatusPending, web.StatusWorking, web.StatusOK, web.StatusPending, web.StatusWorking).Scan(&existingID, &status, &updatedAt)
+	if err == nil {
+		active := status == web.StatusPending || status == web.StatusWorking
+		fresh := status == web.StatusOK && now.Unix()-updatedAt <= int64(ttl.Seconds())
+		if active || (fresh && !forceRefresh) {
+			const get = `SELECT id, name, status, data, created_at, updated_at, cache_key FROM jobs WHERE id = ?`
+			cached, getErr := rowToJob(tx.QueryRowContext(ctx, get, existingID))
+			if getErr != nil {
+				return web.Job{}, false, false, getErr
+			}
+			if err := tx.Commit(); err != nil {
+				return web.Job{}, false, false, err
+			}
+			return cached, true, fresh, nil
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return web.Job{}, false, false, err
+	}
+
+	item, err := jobToRow(candidate)
+	if err != nil {
+		return web.Job{}, false, false, err
+	}
+	const insert = `INSERT INTO jobs (id, name, status, data, created_at, updated_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	if _, err := tx.ExecContext(ctx, insert, item.ID, item.Name, item.Status, item.Data, item.CreatedAt, item.UpdatedAt, key); err != nil {
+		return web.Job{}, false, false, err
+	}
+	candidate.CacheKey = key
+	if err := tx.Commit(); err != nil {
+		return web.Job{}, false, false, err
+	}
+	return *candidate, false, false, nil
 }
 
 func initDatabase(path string) (*sql.DB, error) {
@@ -275,7 +326,8 @@ func createSchema(db *sql.DB) error {
 			status TEXT NOT NULL,
 			data TEXT NOT NULL,
 			created_at INT NOT NULL,
-			updated_at INT NOT NULL
+			updated_at INT NOT NULL,
+			cache_key TEXT NOT NULL DEFAULT ''
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id
@@ -288,7 +340,88 @@ func createSchema(db *sql.DB) error {
 		);
 	`)
 
+	if err != nil {
+		return err
+	}
+	if err := ensureCacheKeyColumn(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_cache_key_created_at ON jobs (cache_key, created_at DESC, id DESC)`); err != nil {
+		return err
+	}
+	return backfillCacheKeys(db)
+}
+
+func ensureCacheKeyColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(jobs)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "cache_key" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE jobs ADD COLUMN cache_key TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+func backfillCacheKeys(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, data FROM jobs WHERE cache_key = ''`)
+	if err != nil {
+		return err
+	}
+	type record struct{ id, data string }
+	var records []record
+	for rows.Next() {
+		var item record
+		if err := rows.Scan(&item.id, &item.data); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		records = append(records, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range records {
+		var data web.JobData
+		if err := json.Unmarshal([]byte(item.data), &data); err != nil {
+			// A malformed legacy job must not prevent the service from starting.
+			continue
+		}
+		key, err := web.SearchCacheKey(data)
+		if err != nil {
+			continue
+		}
+		if _, err := db.Exec(`UPDATE jobs SET cache_key = ? WHERE id = ? AND cache_key = ''`, key, item.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CreateFirstCredential bootstraps the first API identity exactly once.

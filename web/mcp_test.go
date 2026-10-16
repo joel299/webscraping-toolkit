@@ -271,7 +271,7 @@ func TestOpenAPIDocumentsMCPRoute(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("OpenAPI spec status = %d, want 200", recorder.Code)
 	}
-	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id", "/api/v1/tokens:", "token:issue", "CreateTokenResponse", "name: Farmácias em Campo Grande, MS", "keywords: [\"farmácias em Campo Grande, MS\"]"} {
+	for _, expected := range []string{"  /mcp:", "MCP Streamable HTTP endpoint", "tools/list", "tools/call", "BearerAuth", "Mcp-Session-Id", "/api/v1/tokens:", "token:issue", "CreateTokenResponse", "name: Farmácias em Campo Grande, MS", "keywords: [\"farmácias em Campo Grande, MS\"]", "category: farmácia", "force_refresh: false", "últimos 30 dias"} {
 		if !strings.Contains(recorder.Body.String(), expected) {
 			t.Errorf("OpenAPI spec does not document %q", expected)
 		}

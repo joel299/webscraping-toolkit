@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Service struct {
@@ -18,6 +19,12 @@ type Service struct {
 	globalLeadsMetrics   globalLeadsCacheMetrics
 	globalLeadsCacheMu   sync.Mutex
 	globalLeadsCacheKeys map[string]struct{}
+	searchCacheMu        sync.Mutex
+}
+
+// SearchCacheRepository atomically reuses a pending, running, or recent successful search.
+type SearchCacheRepository interface {
+	CreateOrReuseSearch(context.Context, *Job, string, time.Time, time.Duration, bool) (Job, bool, bool, error)
 }
 
 // SetCredentialStore configures persistent API account authentication.
@@ -47,7 +54,27 @@ func databaseReadMode() bool {
 }
 
 func (s *Service) Create(ctx context.Context, job *Job) error {
-	return s.repo.Create(ctx, job)
+	_, _, _, err := s.CreateOrReuseSearch(ctx, job, false)
+	return err
+}
+
+// CreateOrReuseSearch returns a matching job when it is already running or has a fresh result.
+func (s *Service) CreateOrReuseSearch(ctx context.Context, job *Job, forceRefresh bool) (Job, bool, bool, error) {
+	key, err := SearchCacheKey(job.Data)
+	if err != nil {
+		return Job{}, false, false, err
+	}
+	job.CacheKey = key
+
+	if cacheRepo, ok := s.repo.(SearchCacheRepository); ok {
+		s.searchCacheMu.Lock()
+		defer s.searchCacheMu.Unlock()
+		return cacheRepo.CreateOrReuseSearch(ctx, job, key, time.Now().UTC(), SearchCacheTTL, forceRefresh)
+	}
+	if err := s.repo.Create(ctx, job); err != nil {
+		return Job{}, false, false, err
+	}
+	return *job, false, false, nil
 }
 
 func (s *Service) All(ctx context.Context) ([]Job, error) {

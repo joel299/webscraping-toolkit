@@ -17,10 +17,11 @@ var (
 )
 
 const (
-	StatusPending = "pending"
-	StatusWorking = "working"
-	StatusOK      = "ok"
-	StatusFailed  = "failed"
+	StatusPending  = "pending"
+	StatusWorking  = "working"
+	StatusOK       = "ok"
+	StatusFailed   = "failed"
+	SearchCacheTTL = 30 * 24 * time.Hour
 )
 
 type SelectParams struct {
@@ -82,11 +83,12 @@ type JobClaimer interface {
 }
 
 type Job struct {
-	ID     string
-	Name   string
-	Date   time.Time
-	Status string
-	Data   JobData
+	ID       string
+	Name     string
+	Date     time.Time
+	Status   string
+	Data     JobData
+	CacheKey string `json:"-"`
 }
 
 func (j *Job) Validate() error {
@@ -115,6 +117,9 @@ func (j *Job) Validate() error {
 
 type JobData struct {
 	Keywords     []string      `json:"keywords"`
+	Category     string        `json:"category,omitempty"`
+	City         string        `json:"city,omitempty"`
+	State        string        `json:"state,omitempty"`
 	Lang         string        `json:"lang"`
 	Zoom         int           `json:"zoom"`
 	Lat          string        `json:"lat"`
@@ -147,6 +152,11 @@ func (d *JobData) Validate() error {
 
 	if d.MaxTime == 0 {
 		return errors.New("missing max time")
+	}
+	hasCategory := strings.TrimSpace(d.Category) != ""
+	hasCity := strings.TrimSpace(d.City) != ""
+	if hasCategory != hasCity {
+		return errors.New("category and city must be supplied together")
 	}
 
 	latText := strings.TrimSpace(d.Lat)

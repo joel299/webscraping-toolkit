@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +108,118 @@ func TestClaimPendingConcurrentConnectionsClaimsOneJob(t *testing.T) {
 	}
 	if job.Status != web.StatusWorking {
 		t.Fatalf("status=%q, want %q", job.Status, web.StatusWorking)
+	}
+}
+
+func TestCreateOrReuseSearchUsesRecentResultsAndHonorsRefresh(t *testing.T) {
+	repo := newTestRepo(t)
+	now := time.Now().UTC()
+	data := web.JobData{
+		Keywords: []string{"farmácias em Água Clara, MS"}, Category: "Farmácia", City: "Água Clara", State: "MS",
+		Lang: "pt", Depth: 1, MaxTime: time.Minute,
+	}
+	key, err := web.SearchCacheKey(data)
+	if err != nil {
+		t.Fatalf("SearchCacheKey: %v", err)
+	}
+	first := web.Job{ID: "first", Name: "Farmácias — Água Clara, MS", Date: now, Status: web.StatusPending, Data: data}
+	created, reused, hit, err := repo.CreateOrReuseSearch(context.Background(), &first, key, now, web.SearchCacheTTL, false)
+	if err != nil || reused || hit || created.ID != first.ID {
+		t.Fatalf("first search = (%+v, reused=%t, hit=%t, err=%v)", created, reused, hit, err)
+	}
+
+	duplicate := web.Job{ID: "duplicate", Name: "Same query", Date: now, Status: web.StatusPending, Data: data}
+	active, reused, hit, err := repo.CreateOrReuseSearch(context.Background(), &duplicate, key, now, web.SearchCacheTTL, false)
+	if err != nil || !reused || hit || active.ID != first.ID {
+		t.Fatalf("active duplicate = (%+v, reused=%t, hit=%t, err=%v)", active, reused, hit, err)
+	}
+
+	first.Status = web.StatusOK
+	if err := repo.Update(context.Background(), &first); err != nil {
+		t.Fatalf("Update completed job: %v", err)
+	}
+	completed, reused, hit, err := repo.CreateOrReuseSearch(context.Background(), &duplicate, key, time.Now().UTC(), web.SearchCacheTTL, false)
+	if err != nil || !reused || !hit || completed.ID != first.ID || completed.Status != web.StatusOK {
+		t.Fatalf("recent result = (%+v, reused=%t, hit=%t, err=%v)", completed, reused, hit, err)
+	}
+
+	refreshed, reused, hit, err := repo.CreateOrReuseSearch(context.Background(), &duplicate, key, time.Now().UTC(), web.SearchCacheTTL, true)
+	if err != nil || reused || hit || refreshed.ID != duplicate.ID {
+		t.Fatalf("forced refresh = (%+v, reused=%t, hit=%t, err=%v)", refreshed, reused, hit, err)
+	}
+}
+
+func TestCreateOrReuseSearchCreatesAfterTTLExpires(t *testing.T) {
+	repo := newTestRepo(t)
+	now := time.Now().UTC()
+	data := web.JobData{Keywords: []string{"pharmacy Agua Clara MS"}, Lang: "pt", Depth: 1, MaxTime: time.Minute}
+	key, err := web.SearchCacheKey(data)
+	if err != nil {
+		t.Fatalf("SearchCacheKey: %v", err)
+	}
+	completed := web.Job{ID: "completed", Name: "Search", Date: now, Status: web.StatusOK, Data: data, CacheKey: key}
+	if err := repo.Create(context.Background(), &completed); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	created := web.Job{ID: "after-expiry", Name: "Search", Date: now.Add(web.SearchCacheTTL + time.Second), Status: web.StatusPending, Data: data}
+	result, reused, hit, err := repo.CreateOrReuseSearch(context.Background(), &created, key, created.Date, web.SearchCacheTTL, false)
+	if err != nil || reused || hit || result.ID != created.ID {
+		t.Fatalf("expired cache = (%+v, reused=%t, hit=%t, err=%v)", result, reused, hit, err)
+	}
+}
+
+func TestCreateOrReuseSearchCoalescesConcurrentRequests(t *testing.T) {
+	repo := newTestRepo(t)
+	service := web.NewService(repo, t.TempDir())
+	data := web.JobData{Keywords: []string{"pharmacies Lyon"}, Lang: "en", Depth: 1, MaxTime: time.Minute}
+	const requestCount = 12
+	start := make(chan struct{})
+	results := make(chan struct {
+		jobID string
+		err   error
+	}, requestCount)
+	var ready sync.WaitGroup
+	ready.Add(requestCount)
+	var done sync.WaitGroup
+	done.Add(requestCount)
+	for i := range requestCount {
+		go func(i int) {
+			defer done.Done()
+			job := web.Job{
+				ID: "concurrent-" + strconv.Itoa(i), Name: "Pharmacies Lyon", Date: time.Now().UTC(),
+				Status: web.StatusPending, Data: data,
+			}
+			ready.Done()
+			<-start
+			reused, _, _, err := service.CreateOrReuseSearch(context.Background(), &job, false)
+			results <- struct {
+				jobID string
+				err   error
+			}{reused.ID, err}
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+	close(results)
+
+	var firstID string
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("CreateOrReuseSearch: %v", result.err)
+		}
+		if firstID == "" {
+			firstID = result.jobID
+		} else if result.jobID != firstID {
+			t.Fatalf("concurrent request got job %s, want %s", result.jobID, firstID)
+		}
+	}
+	jobs, err := repo.Select(context.Background(), web.SelectParams{})
+	if err != nil {
+		t.Fatalf("Select jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("concurrent identical requests created %d jobs, want 1", len(jobs))
 	}
 }
 

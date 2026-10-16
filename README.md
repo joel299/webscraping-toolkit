@@ -220,6 +220,10 @@ $env:PROSPECT_READ_MODE = 'database'
 
 Não versione arquivos de credenciais. `.secrets/` está excluída do Git e do contexto de build Docker.
 
+### Cache de pesquisas
+
+Antes de criar uma busca pelo formulário, API ou MCP, o servidor compara as palavras-chave normalizadas (incluindo categoria, cidade e estado quando enviados) e os parâmetros que alteram a cobertura. Um job em andamento é reutilizado; um job concluído com sucesso nos últimos 30 dias é devolvido como cache hit. Jobs falhos ou vencidos geram nova coleta. Para ignorar um resultado recente, envie `force_refresh: true` na API/MCP ou marque **Ignorar resultados recentes e fazer nova coleta** no formulário. Jobs legados são indexados na inicialização a partir das palavras-chave já salvas.
+
 ### MCP autenticado e ferramentas WebMCP
 
 O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. A rota também aparece no contrato OpenAPI exibido em `/api/docs`, com exemplos de `initialize`, `tools/list` e `tools/call`. No Compose, a chave é montada no container em `/run/secrets/mcp_jwt_secret`; fora do Docker, configure `MCP_JWT_SECRET_FILE` com um caminho do sistema operacional em uso. A chave deve permanecer igual entre reinícios do serviço.

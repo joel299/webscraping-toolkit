@@ -73,6 +73,7 @@
                         </div>
                     </div>
 
+                    <div id="search-cache-notice" role="status" aria-live="polite" hidden></div>
                     <div id="error-container" style="color: var(--color-danger); padding: 0.75rem 1.5rem; font-size: 0.875rem;"></div>
                     <div id="spinner" class="spinner"></div>
 
@@ -196,6 +197,9 @@
 
                     <!-- Campos Internos Automatizados (Hidden do usuário comercial) -->
                     <input type="hidden" id="name" name="name" value="">
+                    <input type="hidden" id="category" name="category" value="">
+                    <input type="hidden" id="city" name="city" value="">
+                    <input type="hidden" id="state" name="state" value="">
                     <textarea id="keywords" name="keywords" style="display:none;"></textarea>
                     <input type="hidden" id="lang" name="lang" value="pt">
                     <input type="hidden" id="depth" name="depth" value="5">
@@ -218,6 +222,12 @@
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="fastmode" name="fastmode">
                                     <label for="fastmode" style="margin-bottom:0;">Busca rápida</label>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="force-refresh" name="force_refresh">
+                                    <label for="force-refresh" style="margin-bottom:0;">Ignorar resultados recentes e fazer nova coleta</label>
                                 </div>
                             </div>
                         </div>
@@ -266,16 +276,25 @@
         function prepareFormSubmission() {
             const segment = document.getElementById('segment-input')?.value.trim() || '';
             const city = document.getElementById('city-input')?.value.trim() || '';
+            const locationMatch = city.match(/^(.*?)\s*[-,]\s*([a-z]{2})$/i);
+            const cityName = locationMatch ? locationMatch[1].trim() : city;
+            const stateCode = locationMatch ? locationMatch[2].toUpperCase() : '';
             const qty = parseInt(document.getElementById('quantity-input')?.value || '50', 10);
 
             const searchName = segment && city ? `${segment} — ${city}` : (segment || city || 'Nova Busca');
             const keywordText = segment && city ? `${segment} em ${city}` : searchName;
 
             const nameEl = document.getElementById('name');
+            const categoryEl = document.getElementById('category');
+            const cityEl = document.getElementById('city');
+            const stateEl = document.getElementById('state');
             const keywordsEl = document.getElementById('keywords');
             const depthEl = document.getElementById('depth');
 
             if (nameEl) nameEl.value = searchName;
+            if (categoryEl) categoryEl.value = segment;
+            if (cityEl) cityEl.value = cityName;
+            if (stateEl) stateEl.value = stateCode;
             if (keywordsEl) keywordsEl.value = keywordText;
             if (depthEl) depthEl.value = Math.max(1, Math.ceil(qty / 10));
         }
@@ -379,6 +398,14 @@
                 const tbody = document.getElementById('job-tbody');
                 if (tbody && window.htmx) htmx.trigger(tbody, 'refresh');
             }, 500);
+        });
+
+        document.body.addEventListener('search-result-created', function(evt) {
+            const notice = document.getElementById('search-cache-notice');
+            if (!notice || !evt.detail) return;
+            notice.textContent = evt.detail.message + (evt.detail.cacheHit ? ' ID: ' + evt.detail.jobId : '');
+            notice.className = evt.detail.cacheHit ? 'search-cache-notice search-cache-notice-ready' : 'search-cache-notice';
+            notice.hidden = false;
         });
 
         // GLOBAL LEADS ENGINE

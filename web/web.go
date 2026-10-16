@@ -253,6 +253,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 type formData struct {
 	Name     string
+	Category string
+	City     string
+	State    string
 	MaxTime  string
 	Keywords []string
 	Language string
@@ -316,6 +319,9 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 
 	data := formData{
 		Name:     "",
+		Category: "",
+		City:     "",
+		State:    "",
 		MaxTime:  "10m",
 		Keywords: []string{},
 		Language: "en",
@@ -388,6 +394,9 @@ func (s *Server) scrape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newJob.Data.Lang = r.Form.Get("lang")
+	newJob.Data.Category = r.Form.Get("category")
+	newJob.Data.City = r.Form.Get("city")
+	newJob.Data.State = r.Form.Get("state")
 
 	newJob.Data.Zoom, err = strconv.Atoi(r.Form.Get("zoom"))
 	if err != nil {
@@ -438,12 +447,26 @@ func (s *Server) scrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.Create(r.Context(), &newJob)
+	job, reused, cacheHit, err := s.svc.CreateOrReuseSearch(r.Context(), &newJob, r.Form.Get("force_refresh") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return
 	}
+	message := "Pesquisa adicionada à fila para processamento."
+	if cacheHit {
+		message = "Pesquisa já concluída: os resultados salvos foram reutilizados."
+	} else if reused {
+		message = "Esta pesquisa já está em andamento; o trabalho existente foi mantido."
+	}
+	trigger, err := json.Marshal(map[string]any{"search-result-created": map[string]any{
+		"jobId": job.ID, "message": message, "cacheHit": cacheHit, "reused": reused,
+	}})
+	if err != nil {
+		http.Error(w, "could not encode search status", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Trigger", string(trigger))
 
 	if err := s.renderJobsPage(r.Context(), w, 1); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -566,12 +589,16 @@ type apiError struct {
 }
 
 type apiScrapeRequest struct {
-	Name string
+	Name         string `json:"name"`
+	ForceRefresh bool   `json:"force_refresh,omitempty"`
 	JobData
 }
 
 type apiScrapeResponse struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Reused   bool   `json:"reused"`
+	CacheHit bool   `json:"cache_hit"`
 }
 
 func (s *Server) scalarHandler(w http.ResponseWriter, _ *http.Request) {
@@ -633,7 +660,7 @@ func (s *Server) apiScrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.Create(r.Context(), &newJob)
+	result, reused, cacheHit, err := s.svc.CreateOrReuseSearch(r.Context(), &newJob, req.ForceRefresh)
 	if err != nil {
 		ans := apiError{
 			Code:    http.StatusInternalServerError,
@@ -646,10 +673,17 @@ func (s *Server) apiScrape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ans := apiScrapeResponse{
-		ID: newJob.ID,
+		ID:       result.ID,
+		Status:   result.Status,
+		Reused:   reused,
+		CacheHit: cacheHit,
 	}
 
-	renderJSON(w, http.StatusCreated, ans)
+	statusCode := http.StatusCreated
+	if reused {
+		statusCode = http.StatusOK
+	}
+	renderJSON(w, statusCode, ans)
 }
 
 func (s *Server) apiGetJobs(w http.ResponseWriter, r *http.Request) {
