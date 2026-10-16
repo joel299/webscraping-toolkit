@@ -158,18 +158,32 @@ Mais detalhes:
 
 ## Quick start com Docker
 
-Docker é o caminho mais simples porque a imagem já prepara Chromium e dependências do Playwright.
+O mesmo `compose.yaml` funciona no Docker Desktop (Windows) e no Docker Engine (Linux). Ele inicia a interface e o scraper em um container Linux, persiste os dados em um volume Docker e monta a chave JWT como secret. O Docker daemon precisa estar iniciado.
 
-### 1. Build
+Crie a chave uma vez na pasta do projeto. No PowerShell:
 
-```bash
-docker build -t webscraping-toolkit .
+```powershell
+New-Item -ItemType Directory -Force .secrets | Out-Null
+$bytes = [byte[]]::new(32)
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$key = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) '.secrets/mcp-jwt-secret.txt'), $key, [System.Text.UTF8Encoding]::new($false))
+$bytes = $null; $key = $null
 ```
 
-### 2. Executar somente a interface/scraper
+No Linux:
 
 ```bash
-docker run --rm -p 8086:8086 -v "$PWD/webdata:/data" webscraping-toolkit -web -addr :8086 -data-folder /data
+mkdir -p .secrets
+(umask 077; openssl rand -base64 32 > .secrets/mcp-jwt-secret.txt)
+```
+
+Suba o serviço, tanto no Windows quanto no Linux:
+
+```text
+docker compose up -d --build
+docker compose ps
 ```
 
 Acesse:
@@ -189,7 +203,13 @@ Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
 .\scripts\configure-postgres.ps1
 ```
 
-O script solicita host, porta, banco, usuário e senha oculta; grava a DSN em `%APPDATA%\CentralDeLeads\postgres-url.txt`, com ACL restrita ao usuário atual, e define `PROSPECT_DATABASE_URL_FILE` no ambiente do usuário. Feche e reabra o terminal e reinicie a aplicação para carregar a configuração. O script mantém `PROSPECT_READ_MODE=current` até você aplicar as migrations.
+O script solicita host, porta, banco, usuário e senha oculta; grava a DSN em `%APPDATA%\CentralDeLeads\postgres-url.txt`, com ACL restrita ao usuário atual, e define `PROSPECT_DATABASE_URL_FILE` no ambiente do usuário. Esse script configura uma execução nativa no Windows. Para Docker ou Linux, grave a DSN em `.secrets/prospect_database_url` e inicie com os dois arquivos Compose:
+
+```text
+docker compose -f compose.yaml -f compose.postgres.yaml up -d --build
+```
+
+O Compose monta o arquivo como `/run/secrets/prospect_database_url`. Mantenha `PROSPECT_READ_MODE=current` até aplicar as migrations; depois defina `PROSPECT_READ_MODE=database` no `.env` ao lado do Compose.
 
 O schema suportado pela aplicação é `public.prospect_leads_google`, `public.prospect_searches` e `public.prospect_search_leads`. A tabela legada `public.google_maps` não é usada por este código. Aplique os arquivos SQL de `supabase/migrations` no banco correto antes de habilitar a leitura pelo PostgreSQL. Após confirmar as migrations, use no PowerShell:
 
@@ -198,24 +218,13 @@ O schema suportado pela aplicação é `public.prospect_leads_google`, `public.p
 $env:PROSPECT_READ_MODE = 'database'
 ```
 
-Exemplo de montagem:
-
-```bash
-docker run --rm -p 8086:8086 -e PROSPECT_DATABASE_URL_FILE=/run/secrets/prospect_database_url -e PROSPECT_READ_MODE=current -v "$PWD/.secrets/prospect_database_url:/run/secrets/prospect_database_url:ro" -v "$PWD/webdata:/data" webscraping-toolkit -web -addr :8086 -data-folder /data
-```
-
-Não versione o arquivo de credenciais.
+Não versione arquivos de credenciais. `.secrets/` está excluída do Git e do contexto de build Docker.
 
 ### MCP autenticado e ferramentas WebMCP
 
-O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. A rota também aparece no contrato OpenAPI exibido em `/api/docs`, com exemplos de `initialize`, `tools/list` e `tools/call`. O endpoint MCP e as rotas `/api/v1/*` exigem bearer JWT depois de configurar a chave. A chave fica em arquivo no perfil do Windows:
+O servidor MCP usa Streamable HTTP no mesmo processo web e fica em `http://127.0.0.1:8086/mcp`. A rota também aparece no contrato OpenAPI exibido em `/api/docs`, com exemplos de `initialize`, `tools/list` e `tools/call`. No Compose, a chave é montada no container em `/run/secrets/mcp_jwt_secret`; fora do Docker, configure `MCP_JWT_SECRET_FILE` com um caminho do sistema operacional em uso. A chave deve permanecer igual entre reinícios do serviço.
 
-```powershell
-Set-Location C:\Users\Usuario\Documents\webscraping-toolkit
-.\scripts\setup-mcp-auth.ps1
-```
-
-Reinicie o servidor para ativar a autenticação. Para um servidor remoto (por exemplo, publicado na tailnet), crie a conta inicial pela própria API/Scalar em `POST /api/v1/auth/setup` ou entre em `POST /api/v1/auth/login`. Esses endpoints assinam o token no servidor que atende o MCP; o token administrativo retornado inclui `token:issue`.
+Para iniciar, crie a conta pela própria API/Scalar em `POST /api/v1/auth/setup` ou entre em `POST /api/v1/auth/login`. Esses endpoints assinam o token no servidor que atende o MCP; o token administrativo retornado inclui `token:issue`.
 
 Use esse token administrativo para chamar `POST /api/v1/tokens` e emitir o token próprio do Hermes, com apenas os escopos necessários. Por exemplo, `read` e `write` permitem consultar e iniciar pesquisas:
 
@@ -248,7 +257,11 @@ Para um servidor local que use esta mesma chave, também é possível gerar dire
 
 Trate qualquer token como senha e não o envie em conversas ou repositórios. As permissões disponíveis são `read`, `write`, `delete` e `token:issue`; o limite de validade é 30 dias. O servidor disponibiliza seis ferramentas: `list_jobs`, `create_job`, `list_leads`, `get_job`, `download_job_csv` e `delete_job`. Criação e exclusão pedem `confirm=true`; exclusão também exige o escopo `delete`.
 
-Para disponibilizar o serviço somente na tailnet com HTTPS, com o app local em execução, use `tailscale serve --bg http://127.0.0.1:8086`. O cliente MCP deve conectar a `https://<MagicDNS-do-computador>/mcp` e enviar `Authorization: Bearer <token-do-agente>`. O acesso de rede continua sujeito às políticas de acesso da tailnet; o Funnel não é necessário.
+O Compose publica a porta somente em `127.0.0.1` por padrão. Para disponibilizar o serviço na tailnet com HTTPS, execute `tailscale serve --bg http://127.0.0.1:8086` no host Docker. O cliente MCP deve conectar a `https://<MagicDNS-do-computador>/mcp` e enviar `Authorization: Bearer <token-do-agente>`. O acesso de rede continua sujeito às políticas da tailnet; o Funnel não é necessário.
+
+### Publicar a imagem no Docker Hub
+
+O workflow `.github/workflows/publish-central-de-leads.yml` publica a imagem Linux para `amd64` e `arm64` em cada atualização de `main` e em tags `web-v*`. Configure os secrets `DOCKER_USERNAME` e `DOCKER_PASSWORD` nas configurações do repositório GitHub; a imagem fica em `<usuario-dockerhub>/central-de-leads`. Depois da publicação, o host pode usar essa imagem definindo `CENTRAL_DE_LEADS_IMAGE=<usuario-dockerhub>/central-de-leads:latest` no arquivo `.env` ao lado do `compose.yaml` e iniciar com `docker compose pull app` e `docker compose up -d --no-build`.
 
 Na página **Integrações / API**, cole o token no campo da sessão. Quando o navegador oferece `document.modelContext`, o frontend registra essas mesmas seis operações como ferramentas WebMCP. Navegadores sem essa API ainda podem conectar um cliente MCP em `/mcp`. WebMCP é a API de ferramentas do navegador; `/mcp` é o endpoint MCP remoto do servidor.
 

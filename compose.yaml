@@ -1,0 +1,39 @@
+name: central-de-leads
+
+services:
+  app:
+    image: ${CENTRAL_DE_LEADS_IMAGE:-central-de-leads:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - -web
+      - -addr
+      - :8086
+      - -data-folder
+      - /data
+      - -pages-per-browser
+      - "2"
+    restart: unless-stopped
+    ports:
+      - "${CENTRAL_DE_LEADS_BIND:-127.0.0.1}:${CENTRAL_DE_LEADS_PORT:-8086}:8086"
+    environment:
+      MCP_JWT_SECRET_FILE: /run/secrets/mcp_jwt_secret
+      PROSPECT_READ_MODE: ${PROSPECT_READ_MODE:-current}
+    secrets:
+      - mcp_jwt_secret
+    volumes:
+      - app_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8086/api/docs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+
+secrets:
+  mcp_jwt_secret:
+    file: ./.secrets/mcp-jwt-secret.txt
+
+volumes:
+  app_data:

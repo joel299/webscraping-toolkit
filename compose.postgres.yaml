@@ -1,0 +1,11 @@
+services:
+  app:
+    environment:
+      PROSPECT_DATABASE_URL_FILE: /run/secrets/prospect_database_url
+    secrets:
+      - mcp_jwt_secret
+      - prospect_database_url
+
+secrets:
+  prospect_database_url:
+    file: ./.secrets/prospect_database_url

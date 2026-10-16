@@ -1,0 +1,13 @@
+.git
+.github
+.secrets
+webdata
+webdata-*
+*.db
+*.sqlite
+*.log
+.env
+.env.*
+node_modules
+bin
+dist
